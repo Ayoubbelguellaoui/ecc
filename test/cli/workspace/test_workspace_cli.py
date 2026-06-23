@@ -1174,6 +1174,7 @@ def test_workspace_help_uses_typer_app(capsys):
     assert "Usage: ecc workspace" in out
     assert "create" in out
     assert "run-flow" in out
+    assert "signoff" in out
 
 
 def test_workspace_create_help_lists_existing_options(capsys):
@@ -1189,6 +1190,66 @@ def test_workspace_create_help_lists_existing_options(capsys):
     assert "--top" in out
     assert "--clock" in out
     assert "--freq" in out
+
+
+def test_workspace_signoff_routes_to_service(monkeypatch, tmp_path, capsys):
+    calls = {}
+
+    def fake_collect_signoff_package(
+        directory,
+        output_dir,
+        archive,
+        include_debug,
+        allow_incomplete,
+    ):
+        calls.update({
+            "directory": directory,
+            "output_dir": output_dir,
+            "archive": archive,
+            "include_debug": include_debug,
+            "allow_incomplete": allow_incomplete,
+        })
+        return {
+            "cmd": "signoff",
+            "response": "success",
+            "data": {
+                "package_dir": str(tmp_path / "out" / "gcd_signoff_package"),
+                "archive_path": "",
+                "copied_count": 3,
+            },
+            "message": ["ok"],
+        }
+
+    monkeypatch.setattr(
+        "chipcompiler.cli.commands.workspace.collect_signoff_package",
+        fake_collect_signoff_package,
+    )
+
+    rc = cli_main.run([
+        "workspace",
+        "signoff",
+        "--directory",
+        str(tmp_path / "workspace"),
+        "--output",
+        str(tmp_path / "out"),
+        "--no-archive",
+        "--include-debug",
+        "--allow-incomplete",
+        "--json",
+    ])
+
+    result = _response(capsys)
+    assert rc == 0
+    assert result["cmd"] == "signoff"
+    assert result["response"] == "success"
+    assert result["data"]["copied_count"] == 3
+    assert calls == {
+        "directory": str(tmp_path / "workspace"),
+        "output_dir": str(tmp_path / "out"),
+        "archive": False,
+        "include_debug": True,
+        "allow_incomplete": True,
+    }
 
 
 def test_workspace_json_output_suppresses_runtime_stdout(monkeypatch, tmp_path, capsys):
