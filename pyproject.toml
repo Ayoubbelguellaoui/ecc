@@ -4,7 +4,7 @@ requires = [ "uv-build>=0.8.5" ]
 
 [project]
 name = "ecc"
-version = "0.1.0-alpha.3"
+version = "0.1.0-alpha.4"
 readme = "README.md"
 authors = [
   { name = "Emin", email = "me@emin.chat" },
@@ -21,7 +21,7 @@ classifiers = [
 ]
 dependencies = [
   "ecc-dreamplace==0.1.0a5",
-  "ecc-tools-bin==0.1.0a6",
+  "ecc-tools-bin==0.1.0a7",
   "fastapi>=0.109",
   "klayout>=0.30.2",
   "matplotlib>=3.4",
