@@ -2,6 +2,7 @@
 # -*- encoding: utf-8 -*-
 import sys
 import os
+from pathlib import Path
        
 from chipcompiler.data import WorkspaceStep, Workspace, StateEnum, StepEnum
 from chipcompiler.tools.ecc.module import ECCToolsModule
@@ -16,9 +17,11 @@ from chipcompiler.utility import json_read
 def create_db_engine(workspace: Workspace,
                      step: WorkspaceStep) -> ECCToolsModule:
     """"""
-    def input_path_exists(path: str) -> str | None:
+    def input_path_exists(path: Path | None) -> str | None:
         if not path:
             return None
+
+        path = os.fspath(path)
     
         gzip_path = path if path.endswith(".gz") else f"{path}.gz"
         plain_path = path[:-3] if path.endswith(".gz") else path

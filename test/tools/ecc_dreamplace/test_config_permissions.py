@@ -82,14 +82,46 @@ def test_dreamplace_config_generation_writes_generated_fields_to_copied_config(
 
     dreamplace_config = config_dir / "dreamplace.json"
     mode = dreamplace_config.stat().st_mode
-    data = json_read(str(dreamplace_config))
+    data = json_read(dreamplace_config)
 
     assert mode & stat.S_IWUSR
     assert data["lef_input"] == ["tech.lef", "std.lef"]
     assert data["def_input"] == "input.def"
     assert data["verilog_input"] == "input.v"
-    assert data["result_dir"] == step.data[step.name]
+    assert data["result_dir"] == str(step.data[step.name])
     assert data["base_design_name"] == "gcd"
+
+
+def test_dreamplace_config_uses_empty_strings_for_missing_inputs(
+    tmp_path,
+    monkeypatch,
+    make_ics55_parameters,
+):
+    workspace = Workspace(
+        directory=str(tmp_path / "workspace"),
+        design=OriginDesign(name="gcd"),
+        pdk=PDK(tech="tech.lef", lefs=["std.lef"]),
+        parameters=make_ics55_parameters(),
+    )
+    step = dreamplace_builder.build_step(
+        workspace=workspace,
+        step_name=StepEnum.PLACEMENT.value,
+        input_def=None,
+        input_verilog=None,
+    )
+
+    init_workspace_config(workspace)
+    monkeypatch.setattr(
+        dreamplace_builder.ecc_builder,
+        "build_step_config",
+        lambda _workspace, _step: None,
+    )
+
+    dreamplace_builder.build_step_config(workspace, step)
+
+    dreamplace_config = json_read(workspace.config["dreamplace"])
+    assert dreamplace_config["def_input"] == ""
+    assert dreamplace_config["verilog_input"] == ""
 
 
 def test_workspace_config_generation_applies_flat_dreamplace_parameter_overrides(
@@ -154,7 +186,7 @@ def test_dreamplace_step_config_refresh_reapplies_current_parameter_file(
         parameters=make_ics55_parameters(initial_overrides),
     )
     (tmp_path / "workspace" / "home").mkdir(parents=True)
-    workspace.parameters.path = str(tmp_path / "workspace" / "home" / "parameters.json")
+    workspace.parameters.path = tmp_path / "workspace" / "home" / "parameters.json"
     step = dreamplace_builder.build_step(
         workspace=workspace,
         step_name=StepEnum.PLACEMENT.value,
@@ -188,4 +220,4 @@ def test_dreamplace_step_config_refresh_reapplies_current_parameter_file(
     assert dreamplace_config["target_density"] == updated_overrides["Target density"]
     assert dreamplace_config["def_input"] == "input.def"
     assert dreamplace_config["verilog_input"] == "input.v"
-    assert dreamplace_config["result_dir"] == step.data[step.name]
+    assert dreamplace_config["result_dir"] == str(step.data[step.name])

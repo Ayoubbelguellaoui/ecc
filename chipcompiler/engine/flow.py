@@ -104,6 +104,9 @@ class EngineFlow:
         load flow config json from workspace
         """
         from chipcompiler.utility import json_read
+        if not self.workspace.flow.path:
+            self.workspace.flow.data = {}
+            return False
         self.workspace.flow.data = json_read(self.workspace.flow.path)
         if len(self.workspace.flow.data.get("steps", [])) <= 0:
             return False
@@ -248,9 +251,9 @@ class EngineFlow:
                 input_db = None
             else:
                 # use the output def and verilog from last step.
-                input_def = pre_step.output.get("def", "")
-                input_verilog = pre_step.output.get("verilog", "")
-                input_db = pre_step.output.get("db", "")
+                input_def = pre_step.output.get("def")
+                input_verilog = pre_step.output.get("verilog")
+                input_db = pre_step.output.get("db")
 
             from chipcompiler.tools import create_step, run_step
             # create workspace step

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import shutil
+from pathlib import Path
 
 from rosettakit import cmdfile
 
@@ -14,19 +15,21 @@ from .utility import find_sizer_root
 def build_step(
     workspace: Workspace,
     step_name: str,
-    input_def: str,
-    input_verilog: str,
-    input_db: str | None = None,
-    output_def: str | None = None,
-    output_verilog: str | None = None,
-    output_gds: str | None = None,
+    input_def: Path | None,
+    input_verilog: Path | None,
+    input_db: Path | None = None,
+    output_def: Path | None = None,
+    output_verilog: Path | None = None,
+    output_gds: Path | None = None,
 ) -> WorkspaceStep:
     safe_step_name = "_".join(step_name.split()).lower()
-    step_directory = f"{workspace.directory}/{safe_step_name}_sizer"
+    step_directory = Path(workspace.directory) / f"{safe_step_name}_sizer"
     if output_def is None:
-        output_def = f"{step_directory}/output/{workspace.design.name}_{safe_step_name}.def.gz"
+        output_def = step_directory / "output" / f"{workspace.design.name}_{safe_step_name}.def.gz"
     if output_verilog is None:
-        output_verilog = f"{step_directory}/output/{workspace.design.name}_{safe_step_name}.v.gz"
+        output_verilog = (
+            step_directory / "output" / f"{workspace.design.name}_{safe_step_name}.v.gz"
+        )
 
     step = ecc_builder.build_step(
         workspace=workspace,
@@ -41,8 +44,8 @@ def build_step(
         step_directory=step_directory,
     )
     step.output["db"] = ""
-    step.script["sizer_env"] = f"{step.script['dir']}/{workspace.design.name}.env_file"
-    step.script["sizer_cmd"] = f"{step.script['dir']}/{workspace.design.name}.cmd_file"
+    step.script["sizer_env"] = step.script["dir"] / f"{workspace.design.name}.env_file"
+    step.script["sizer_cmd"] = step.script["dir"] / f"{workspace.design.name}.cmd_file"
     return step
 
 
@@ -64,28 +67,28 @@ def build_checklist(workspace: Workspace, workspace_step: WorkspaceStep) -> None
     checklist.build_checklist()
 
 
-def _copy_or_seed_template(template: str, target: str, fallback: str) -> None:
-    os.makedirs(os.path.dirname(target), exist_ok=True)
-    if os.path.exists(template):
+def _copy_or_seed_template(template: Path | None, target: Path, fallback: str) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if template and template.exists():
         shutil.copy2(template, target)
         return
 
-    with open(target, "w", encoding="utf-8") as file:
+    with target.open("w", encoding="utf-8") as file:
         file.write(fallback)
 
 
-def _append_text(path: str, text: str) -> None:
-    with open(path, "a", encoding="utf-8") as file:
+def _append_text(path: Path, text: str) -> None:
+    with path.open("a", encoding="utf-8") as file:
         file.write(text)
 
 
-def _sizer_env_template() -> str:
+def _sizer_env_template() -> Path | None:
     sizer_root = find_sizer_root()
     if sizer_root is None:
-        return ""
+        return None
 
     submit_dir = sizer_root / "submit"
-    return str(submit_dir / "env_base_file")
+    return submit_dir / "env_base_file"
 
 
 def _tech_text(workspace: Workspace) -> str:
@@ -119,13 +122,13 @@ def _cmd_text(workspace: Workspace, step: WorkspaceStep) -> str:
     command.option("top", workspace.design.top_module or workspace.design.name)
     command.option(
         "def",
-        step.input.get("def", ""),
+        step.input.get("def") or "",
         value_type=cmdfile.ValueType.PATH,
         omit_empty=True,
     )
     command.option(
         "v",
-        step.input.get("verilog", ""),
+        step.input.get("verilog") or "",
         value_type=cmdfile.ValueType.PATH,
         omit_empty=True,
     )
@@ -162,8 +165,8 @@ def build_step_config(workspace: Workspace, step: WorkspaceStep) -> None:
     cmd_path = step.script["sizer_cmd"]
 
     _copy_or_seed_template(env_template, env_path, "-num_vt 1\n")
-    os.makedirs(os.path.dirname(cmd_path), exist_ok=True)
-    with open(cmd_path, "w", encoding="utf-8"):
+    Path(cmd_path).parent.mkdir(parents=True, exist_ok=True)
+    with Path(cmd_path).open("w", encoding="utf-8"):
         pass
 
     _append_text(env_path, _tech_text(workspace))

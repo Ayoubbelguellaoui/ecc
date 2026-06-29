@@ -1,13 +1,95 @@
 import json
+from pathlib import Path
 
 from chipcompiler.data import create_workspace, load_workspace
 from chipcompiler.data.workspace import (
+    Workspace,
+    build_workspace_config_paths,
     init_workspace_config,
     prepare_workspace_for_rerun,
     refresh_workspace_config,
     sync_workspace_config_to_parameters,
 )
 from chipcompiler.utility import json_read, json_write
+
+
+def test_create_workspace_returns_path_fields_and_persists_string_paths(
+    tmp_path, minimal_ics55_pdk_factory, default_ics55_parameters
+):
+    pdk_root = minimal_ics55_pdk_factory(tmp_path / "ics55")
+    rtl_path = tmp_path / "gcd.v"
+    rtl_path.write_text("module gcd(input clk, output y); assign y = clk; endmodule\n")
+
+    workspace_dir = tmp_path / "workspace"
+    workspace = create_workspace(
+        directory=workspace_dir,
+        origin_def="",
+        origin_verilog=rtl_path,
+        pdk="ics55",
+        parameters=default_ics55_parameters,
+        pdk_root=pdk_root,
+    )
+
+    assert workspace is not None
+    assert workspace.directory == workspace_dir.resolve()
+    assert isinstance(workspace.directory, Path)
+    assert isinstance(workspace.design.origin_verilog, Path)
+    assert isinstance(workspace.design.origin_def, Path)
+    assert isinstance(workspace.flow.path, Path)
+    assert isinstance(workspace.parameters.path, Path)
+    assert isinstance(workspace.home.path, Path)
+    assert all(isinstance(path, Path) for path in workspace.config.values())
+
+    home_data = json.loads((workspace_dir / "home" / "home.json").read_text())
+    assert home_data["flow"] == str(workspace.flow.path)
+    assert home_data["parameters"] == str(workspace.parameters.path)
+    assert home_data["checklist"] == str(workspace_dir.resolve() / "home" / "checklist.json")
+    assert isinstance(home_data["flow"], str)
+
+    flow_config = json_read(workspace.config["flow"])
+    assert flow_config["ConfigPath"]["idb_path"] == str(workspace.config["db"])
+    assert isinstance(flow_config["ConfigPath"]["idb_path"], str)
+
+
+def test_load_workspace_restores_path_fields_from_existing_json(
+    tmp_path, minimal_ics55_pdk_factory, default_ics55_parameters
+):
+    pdk_root = minimal_ics55_pdk_factory(tmp_path / "ics55")
+    rtl_path = tmp_path / "gcd.v"
+    rtl_path.write_text("module gcd(input clk, output y); assign y = clk; endmodule\n")
+    def_path = tmp_path / "gcd.def"
+    def_path.write_text("VERSION 5.8 ;\nDESIGN gcd ;\nEND DESIGN\n")
+
+    workspace_dir = tmp_path / "workspace"
+    create_workspace(
+        directory=workspace_dir,
+        origin_def=def_path,
+        origin_verilog=rtl_path,
+        pdk="ics55",
+        parameters=default_ics55_parameters,
+        pdk_root=pdk_root,
+    )
+
+    loaded = load_workspace(workspace_dir)
+
+    assert loaded is not None
+    assert loaded.directory == workspace_dir.resolve()
+    assert loaded.design.origin_verilog == workspace_dir.resolve() / "origin" / "gcd.v"
+    assert loaded.design.origin_def == workspace_dir.resolve() / "origin" / "gcd.def"
+    assert loaded.flow.path == workspace_dir.resolve() / "home" / "flow.json"
+    assert loaded.parameters.path == workspace_dir.resolve() / "home" / "parameters.json"
+    assert loaded.home.path == workspace_dir.resolve() / "home" / "home.json"
+    assert all(isinstance(path, Path) for path in loaded.config.values())
+
+
+def test_build_workspace_config_paths_returns_path_objects(tmp_path):
+    workspace = Workspace(directory=tmp_path / "workspace")
+
+    paths = build_workspace_config_paths(workspace)
+
+    assert paths["dir"] == tmp_path / "workspace" / "config"
+    assert paths["flow"] == tmp_path / "workspace" / "config" / "flow_config.json"
+    assert all(isinstance(path, Path) for path in paths.values())
 
 
 def test_create_workspace_persists_pdk_root_in_parameters(
@@ -28,12 +110,12 @@ def test_create_workspace_persists_pdk_root_in_parameters(
     )
 
     assert workspace is not None
-    resolved_root = str(pdk_root.resolve())
+    resolved_root = pdk_root.resolve()
     assert workspace.pdk.root == resolved_root
-    assert workspace.parameters.data.get("PDK Root") == resolved_root
+    assert workspace.parameters.data.get("PDK Root") == str(resolved_root)
 
     parameters_data = json.loads((workspace_dir / "home" / "parameters.json").read_text())
-    assert parameters_data.get("PDK Root") == resolved_root
+    assert parameters_data.get("PDK Root") == str(resolved_root)
 
 
 def test_load_workspace_restores_pdk_root_from_parameters(
@@ -56,10 +138,10 @@ def test_load_workspace_restores_pdk_root_from_parameters(
     loaded = load_workspace(str(workspace_dir))
 
     assert loaded is not None
-    resolved_root = str(pdk_root.resolve())
+    resolved_root = pdk_root.resolve()
     assert loaded.pdk.root == resolved_root
-    assert loaded.parameters.data.get("PDK Root") == resolved_root
-    assert all(path.startswith(resolved_root) for path in loaded.pdk.libs)
+    assert loaded.parameters.data.get("PDK Root") == str(resolved_root)
+    assert all(path.is_relative_to(resolved_root) for path in loaded.pdk.libs)
 
 
 def test_workspace_config_refresh_uses_updated_parameters(
@@ -80,10 +162,11 @@ def test_workspace_config_refresh_uses_updated_parameters(
     )
 
     workspace = load_workspace(str(workspace_dir))
-    params = json_read(str(workspace_dir / "home" / "parameters.json"))
+    parameter_path = workspace_dir / "home" / "parameters.json"
+    params = json_read(parameter_path)
     params["Max fanout"] = 88
     params["Global right padding"] = 13
-    json_write(str(workspace_dir / "home" / "parameters.json"), params)
+    json_write(parameter_path, params)
 
     init_workspace_config(workspace)
 
@@ -111,7 +194,8 @@ def test_refresh_workspace_config_updates_all_parameter_derived_fields(
     )
 
     workspace = load_workspace(str(workspace_dir))
-    params = json_read(str(workspace_dir / "home" / "parameters.json"))
+    parameter_path = workspace_dir / "home" / "parameters.json"
+    params = json_read(parameter_path)
     params["Max fanout"] = 91
     params["Global right padding"] = 17
     params["Bottom layer"] = "MET3"
@@ -120,7 +204,7 @@ def test_refresh_workspace_config_updates_all_parameter_derived_fields(
     params["Target overflow"] = 0.07
     params["Cell padding x"] = 444
     params["Routability opt flag"] = 0
-    json_write(str(workspace_dir / "home" / "parameters.json"), params)
+    json_write(parameter_path, params)
 
     refresh_workspace_config(workspace)
 
@@ -167,7 +251,7 @@ def test_sync_workspace_config_to_parameters_updates_routing_layers_and_refreshe
     assert sync_workspace_config_to_parameters(workspace, workspace.config["route"]) is True
     refresh_workspace_config(workspace)
 
-    params = json_read(str(workspace_dir / "home" / "parameters.json"))
+    params = json_read(workspace_dir / "home" / "parameters.json")
     db = json_read(workspace.config["db"])
     assert params["Bottom layer"] == "MET4"
     assert params["Top layer"] == "MET7"
@@ -195,11 +279,12 @@ def test_sync_workspace_config_to_parameters_ignores_unmanaged_fields(
     cts = json_read(workspace.config["CTS"])
     cts["skew_bound"] = 0.12
     json_write(workspace.config["CTS"], cts)
-    before = json_read(str(workspace_dir / "home" / "parameters.json"))
+    parameter_path = workspace_dir / "home" / "parameters.json"
+    before = json_read(parameter_path)
 
     assert sync_workspace_config_to_parameters(workspace, workspace.config["CTS"]) is False
 
-    after = json_read(str(workspace_dir / "home" / "parameters.json"))
+    after = json_read(parameter_path)
     assert after == before
 
 
@@ -235,7 +320,7 @@ def test_prepare_workspace_for_rerun_deletes_old_artifacts_and_resets_home_state
     (step_dir / "log" / "floorplan.log").write_text("old log")
 
     home_path = workspace_dir / "home" / "home.json"
-    home = json_read(str(home_path))
+    home = json_read(home_path)
     home["layout"] = str(step_dir / "output" / "gcd_floorplan.png")
     home["metrics"] = {"instances dist.": str(step_dir / "feature" / "floorplan.db.inst_dist.png")}
     home["monitor"] = {
@@ -245,11 +330,11 @@ def test_prepare_workspace_for_rerun_deletes_old_artifacts_and_resets_home_state
         "instance": [3],
         "frequency": [4.0],
     }
-    json_write(str(home_path), home)
+    json_write(home_path, home)
 
     flow_path = workspace_dir / "home" / "flow.json"
     json_write(
-        str(flow_path),
+        flow_path,
         {
             "steps": [
                 {
@@ -266,7 +351,7 @@ def test_prepare_workspace_for_rerun_deletes_old_artifacts_and_resets_home_state
 
     checklist_path = workspace_dir / "home" / "checklist.json"
     json_write(
-        str(checklist_path),
+        checklist_path,
         {
             "path": str(checklist_path),
             "checklist": [
@@ -291,12 +376,12 @@ def test_prepare_workspace_for_rerun_deletes_old_artifacts_and_resets_home_state
 
         def clear_states(self):
             self.clear_calls += 1
-            data = json_read(str(flow_path))
+            data = json_read(flow_path)
             for step in data["steps"]:
                 step["state"] = "Unstart"
                 step["runtime"] = ""
                 step["peak memory (mb)"] = 0
-            json_write(str(flow_path), data)
+            json_write(flow_path, data)
 
         def create_step_workspaces(self):
             self.create_calls += 1
@@ -336,7 +421,7 @@ def test_prepare_workspace_for_rerun_deletes_old_artifacts_and_resets_home_state
     assert reset_parameters["Core"]["Area"] == 0
     assert reset_parameters["Core"]["Bounding box"] == ""
 
-    reset_home = json_read(str(home_path))
+    reset_home = json_read(home_path)
     assert reset_home["parameters"] == str(workspace_dir / "home" / "parameters.json")
     assert reset_home["flow"] == str(flow_path)
     assert reset_home["checklist"] == str(checklist_path)
@@ -344,12 +429,12 @@ def test_prepare_workspace_for_rerun_deletes_old_artifacts_and_resets_home_state
     assert reset_home["metrics"] == {}
     assert reset_home["monitor"]["step"] == []
 
-    reset_flow = json_read(str(flow_path))
+    reset_flow = json_read(flow_path)
     assert reset_flow["steps"][0]["state"] == "Unstart"
     assert reset_flow["steps"][0]["runtime"] == ""
     assert reset_flow["steps"][0]["peak memory (mb)"] == 0
 
-    assert json_read(str(checklist_path)) == {
+    assert json_read(checklist_path) == {
         "path": str(checklist_path),
         "checklist": [],
     }
@@ -376,12 +461,12 @@ def test_create_workspace_sg13g2_persists_pdk_root_in_parameters(
     )
 
     assert workspace is not None
-    resolved_root = str(pdk_root.resolve())
+    resolved_root = pdk_root.resolve()
     assert workspace.pdk.root == resolved_root
-    assert workspace.parameters.data.get("PDK Root") == resolved_root
+    assert workspace.parameters.data.get("PDK Root") == str(resolved_root)
 
     parameters_data = json.loads((workspace_dir / "home" / "parameters.json").read_text())
-    assert parameters_data.get("PDK Root") == resolved_root
+    assert parameters_data.get("PDK Root") == str(resolved_root)
 
 
 def test_load_workspace_sg13g2_restores_pdk_root_from_parameters(
@@ -404,7 +489,7 @@ def test_load_workspace_sg13g2_restores_pdk_root_from_parameters(
     loaded = load_workspace(str(workspace_dir))
 
     assert loaded is not None
-    resolved_root = str(pdk_root.resolve())
+    resolved_root = pdk_root.resolve()
     assert loaded.pdk.root == resolved_root
-    assert loaded.parameters.data.get("PDK Root") == resolved_root
-    assert all(path.startswith(resolved_root) for path in loaded.pdk.libs)
+    assert loaded.parameters.data.get("PDK Root") == str(resolved_root)
+    assert all(path.is_relative_to(resolved_root) for path in loaded.pdk.libs)

@@ -1,4 +1,7 @@
 import os
+from pathlib import Path
+
+from chipcompiler.utility.path import path_is_within, stringify_paths
 
 from chipcompiler.cli.workspace.request import (
     InputError,
@@ -47,14 +50,15 @@ def create_workspace_from_request(request: WorkspaceCreateRequest) -> dict:
             message=[f"create workspace failed : {exc}"],
         )
 
-    directory = os.path.abspath(request.directory)
     if workspace is None:
+        directory = os.path.abspath(request.directory)
         return workspace_response(
             "create_workspace",
             "failed",
             message=[f"create workspace failed : {directory}"],
         )
 
+    directory = os.path.abspath(os.fspath(workspace.directory))
     try:
         build_flow_for_workspace(workspace)
     except Exception as exc:
@@ -274,9 +278,9 @@ def sync_workspace_config(directory: str, config_path: str) -> dict:
         response_data["directory"] = resolved_directory
         response_data["config_path"] = resolved_config_path
 
-        config_dir = os.path.realpath(os.path.join(resolved_directory, "config"))
-        real_config_path = os.path.realpath(resolved_config_path)
-        if not _path_is_within(real_config_path, config_dir):
+        config_dir = Path(resolved_directory) / "config"
+        real_config_path = Path(resolved_config_path).resolve()
+        if not path_is_within(real_config_path, config_dir):
             return workspace_response(
                 cmd,
                 "failed",
@@ -290,7 +294,7 @@ def sync_workspace_config(directory: str, config_path: str) -> dict:
 
         parameters_changed = data_api.sync_workspace_config_to_parameters(
             workspace,
-            resolved_config_path,
+            real_config_path,
         )
         response_data["parameters_changed"] = parameters_changed
         if parameters_changed:
@@ -362,7 +366,7 @@ def get_workspace_info(directory: str, step: str, info_id: str) -> dict:
             message=[f"no information for step {step} : {os.path.abspath(workspace.directory)}"],
         )
 
-    response_data["info"] = info
+    response_data["info"] = stringify_paths(info)
     return workspace_response(
         cmd,
         "success",
@@ -513,13 +517,6 @@ def _prepare_workspace_for_rerun(workspace, engine_flow):
     import chipcompiler.data as data_api
 
     data_api.prepare_workspace_for_rerun(workspace, engine_flow)
-
-
-def _path_is_within(path: str, directory: str) -> bool:
-    try:
-        return os.path.commonpath([path, directory]) == directory
-    except ValueError:
-        return False
 
 
 def _init_db_engine_for_workspace_step(engine_flow, workspace_step):

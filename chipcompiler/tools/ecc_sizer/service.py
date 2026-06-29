@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from chipcompiler.data import Workspace, WorkspaceStep
 from chipcompiler.utility import dict_to_str
+from chipcompiler.utility.path import stringify_paths
 
 
 def get_step_info(workspace: Workspace, step: WorkspaceStep, id: str) -> dict:
@@ -9,9 +10,9 @@ def get_step_info(workspace: Workspace, step: WorkspaceStep, id: str) -> dict:
 
     match id:
         case "input":
-            step_info = dict(step.input)
+            step_info = stringify_paths(step.input)
         case "output":
-            step_info = dict(step.output)
+            step_info = stringify_paths(step.output)
         case "subflow":
             step_info = build_subflow(step)
         case "checklist":
@@ -26,15 +27,15 @@ def get_step_info(workspace: Workspace, step: WorkspaceStep, id: str) -> dict:
 
 
 def build_subflow(step: WorkspaceStep) -> dict:
-    return {"path": step.subflow.get("path", "")}
+    return {"path": stringify_paths(step.subflow.get("path", ""))}
 
 
 def build_checklist(step: WorkspaceStep) -> dict:
-    return {"path": step.checklist.get("path", "")}
+    return {"path": stringify_paths(step.checklist.get("path", ""))}
 
 
 def build_config(step: WorkspaceStep) -> dict:
     return {
-        "sizer_env": step.script.get("sizer_env", ""),
-        "sizer_cmd": step.script.get("sizer_cmd", ""),
+        "sizer_env": stringify_paths(step.script.get("sizer_env", "")),
+        "sizer_cmd": stringify_paths(step.script.get("sizer_cmd", "")),
     }
