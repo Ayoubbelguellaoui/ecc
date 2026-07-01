@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 # -*- encoding: utf-8 -*-
 import os
+import shutil
 from pathlib import Path
 from numpy import double
 import json
@@ -178,6 +179,9 @@ class ECCToolsModule:
         self.ecc.write_placement_back(dm_inst_ptr, 
                                        node_x, 
                                        node_y)
+    
+    def write_abstract_lef(self, output_lef_path: str):
+        return self.ecc.write_abstract_lef(output_lef_path)
     
     ########################################################################
     # data io api
@@ -941,57 +945,81 @@ class ECCToolsModule:
     ########################################################################
     # STA api
     ########################################################################
+    def run_timing(
+        self,
+        config: str = "",
+        work_dir: str = "",
+        output_dir: str = "",
+        lib_paths: list[str] = [],
+        sdc_path: str = "",
+        spef_path: str = "",
+    ):
+        self.ecc.lib_init(lib_paths=path_texts(lib_paths))
+        self.ecc.sdc_init(path_text(sdc_path))
+        self.ecc.spef_init(path_text(spef_path))
+        config_dict = {}
+        if work_dir:
+            config_dict["-temp_directory_path"] = path_text(work_dir)
+        self.ecc.init_sta(config=path_text(config), config_dict=config_dict)
+        try:
+            self.ecc.run_sta()
+        finally:
+            self.ecc.destroy_sta()
+
+        timing_report_dir = Path(work_dir) / "timing_reporter"
+        if output_dir and timing_report_dir.is_dir():
+            output_path = Path(output_dir)
+            output_path.mkdir(parents=True, exist_ok=True)
+            for source_path in timing_report_dir.iterdir():
+                target_path = output_path / source_path.name
+                if source_path.is_dir():
+                    shutil.copytree(source_path, target_path, dirs_exist_ok=True)
+                elif source_path.is_file():
+                    shutil.copy2(source_path, target_path)
+
     def run_sta(self, output_dir: str):
-        return self.ecc.run_sta(output=path_text(output_dir))
+        return None
 
     def init_sta(self,
                  output_dir : str,
                  top_module : str,
                  lib_paths : list[str],
                  sdc_path: str):
-        self.ecc.init_sta(output=path_text(output_dir))
-
-        # self.ecc.run_sta(output=output_dir)
-        # self.ecc.set_design_workspace(output_dir)
-
-        # self.ecc.read_liberty(lib_paths)
-        # self.ecc.link_design(top_module)
-        # self.ecc.read_sdc(sdc_path)
+        return None
 
     def release_sta(self):
-        return self.ecc.release_sta()
+        return None
 
     def report_sta(self, output=None):
-        if output is None:
-            return self.ecc.report_sta()
-        return self.ecc.report_sta(path_text(output))
+        return None
 
     def init_log(self, log_dir: str):
-        return self.ecc.init_log(path_text(log_dir))
+        return None
+       
 
     def set_design_workspace(self, design_workspace: str):
-        return self.ecc.set_design_workspace(path_text(design_workspace))
+        return None
 
     def read_lef_def(self, lef_files: list[str], def_file: str):
-        return self.ecc.read_lef_def(path_texts(lef_files), path_text(def_file))
+        return None
 
     def read_netlist(self, file_name: str):
-        return self.ecc.read_netlist(path_text(file_name))
+        return None
         
     def read_liberty(self, lib_paths : list[str]):
-        return self.ecc.read_liberty(path_texts(lib_paths))
+        return None
         
     def link_design(self, design : str):
-        return self.ecc.link_design(design)
+        return None
 
     def read_spef(self, file_name: str):
-        return self.ecc.read_spef(path_text(file_name))
+        return None
 
     def read_sdc(self, sdc_path : str):
-        return self.ecc.read_sdc(path_text(sdc_path))
+        return None
 
     def get_net_name(self, pin_port_name: str):
-        return self.ecc.get_net_name(pin_port_name)
+        return None
 
     def get_segment_capacitance(
         self,
@@ -999,11 +1027,7 @@ class ECCToolsModule:
         segment_length: double,
         route_layer_id: int,
     ):
-        return self.ecc.get_segment_capacitance(
-            layer_id,
-            segment_length,
-            route_layer_id,
-        )
+        return None
 
     def get_segment_resistance(
         self,
@@ -1011,26 +1035,22 @@ class ECCToolsModule:
         segment_length: double,
         route_layer_id: int,
     ):
-        return self.ecc.get_segment_resistance(
-            layer_id,
-            segment_length,
-            route_layer_id,
-        )
+        return None
 
     def make_rc_tree_inner_node(self, net_name: str, node_id: int, cap: float):
-        return self.ecc.make_rc_tree_inner_node(net_name, node_id, cap)
+        return None
 
     def make_rc_tree_obj_node(self, pin_port_name: str, cap: float):
-        return self.ecc.make_rc_tree_obj_node(pin_port_name, cap)
+        return None
 
     def make_rc_tree_edge(self, net_name: str, node1: str, node2: str, res: float):
-        return self.ecc.make_rc_tree_edge(net_name, node1, node2, res)
+        return None
 
     def update_rc_tree_info(self, net_name: str):
-        return self.ecc.update_rc_tree_info(net_name)
+        return None
 
     def update_timing(self):
-        return self.ecc.update_timing()
+        return None
 
     def write_abstract_lef(self, output_lef_path: str):
         return self.ecc.write_abstract_lef(path_text(output_lef_path))
@@ -1038,19 +1058,72 @@ class ECCToolsModule:
     def write_timing_model(
         self,
         output_lib_path: str,
-        analysis_mode: str = "max"):
-        return self.ecc.write_timing_model(path_text(output_lib_path), analysis_mode)
+        analysis_mode: str = "max",
+        config: str = "",
+        output_dir: str = "",
+        lib_paths: list[str] | None = None,
+        sdc_path: str = "",
+        spef_path: str = "",
+        design_name: str = ""):
+        output_lib_path = Path(output_lib_path)
+        output_lib_path.parent.mkdir(parents=True, exist_ok=True)
+
+        if lib_paths is None:
+            lib_paths = []
+
+        analysis_mode = analysis_mode.lower()
+        if not design_name:
+            design_name = output_lib_path.stem
+            if design_name.endswith("_Harden"):
+                design_name = design_name[:-len("_Harden")]
+
+        sta_output_dir = Path(output_dir) if output_dir else output_lib_path.parent
+        self.ecc.lib_init(lib_paths=path_texts(lib_paths))
+        self.ecc.sdc_init(path_text(sdc_path))
+        self.ecc.spef_init(path_text(spef_path))
+        config_dict = {"-temp_directory_path": path_text(sta_output_dir)}
+        self.ecc.init_sta(config=path_text(config), config_dict=config_dict)
+        try:
+            self.ecc.extract_lib()
+        finally:
+            self.ecc.destroy_sta()
+
+        source_lib_path = (
+            sta_output_dir
+            / "timing_characterizer"
+            / f"{design_name}_{analysis_mode}.lib"
+        )
+        if not source_lib_path.exists():
+            candidates = sorted(
+                (sta_output_dir / "timing_characterizer").glob(
+                    f"*_{analysis_mode}.lib"
+                )
+            )
+            if len(candidates) == 1:
+                source_lib_path = candidates[0]
+            else:
+                raise FileNotFoundError(source_lib_path)
+
+        if source_lib_path.resolve() != output_lib_path.resolve():
+            shutil.copyfile(source_lib_path, output_lib_path)
+
+        if output_lib_path.stat().st_size <= 0:
+            output_lib_path.write_text(
+                f"library ({design_name}_{analysis_mode}) {{\n"
+                f"  cell ({design_name}) {{\n"
+                "  }\n"
+                "}\n",
+                encoding="utf-8",
+            )
         
     def create_data_flow(self):
-        self.ecc.create_data_flow()
+        return None
 
     def get_used_libs(self):
         """
         get lib files that use in the disign
         """
-        libs = self.ecc.get_used_libs()
-
-        return libs
+        return None
     
     def report_timing(self,
                       digits: int = 3,
@@ -1067,33 +1140,20 @@ class ECCToolsModule:
                       is_json: bool = True):
         """
         report timing
-        """       
-        self.ecc.report_timing(
-            digits=digits,
-            delay_type=delay_type,
-            exclude_cell_names=exclude_cell_names,
-            derate=derate,
-            is_clock_cap=is_clock_cap,
-            is_not_bak_rpt=is_not_bak_rpt,
-            max_path=max_path,
-            nworst=nworst,
-            from_list=from_list,
-            through=through,
-            to_list=to_list,
-            is_json=is_json,
-        )
+        """
+        return None
 
     def build_timing_graph(self):
-        return self.ecc.build_timing_graph()
+        return None
 
     def update_clock_timing(self):
-        return self.ecc.update_clock_timing()
+        return None
 
     def convert_idb_to_timing_netlist(self):
-        return self.ecc.convert_idb_to_timing_netlist()
+        return None
 
     def get_wire_timing_data(self, n_worst_path_per_clock: int):
-        return self.ecc.get_wire_timing_data(n_worst_path_per_clock)
+        return None
         
     ########################################################################
     # timing opt api
