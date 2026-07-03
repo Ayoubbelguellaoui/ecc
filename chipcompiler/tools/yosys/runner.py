@@ -7,6 +7,7 @@ from chipcompiler.tools.yosys.checklist import YosysChecklist
 from chipcompiler.tools.yosys.metrics import build_step_metrics
 from chipcompiler.tools.yosys.subflow import YosysSubFlow
 from chipcompiler.tools.yosys.utility import check_slang_plugin, get_yosys_runtime
+from chipcompiler.utility.gzip import read_text_maybe_gzip, write_text_maybe_gzip
 
 
 def _remove_parameter_overrides(text: str) -> str:
@@ -44,13 +45,9 @@ def _write_fixed_netlist(src_path: str, dst_path: str) -> bool:
     if not src_path or not dst_path or not os.path.exists(src_path):
         return False
 
-    with open(src_path, "r", encoding="utf-8", errors="ignore") as src:
-        text = src.read()
-
+    text = read_text_maybe_gzip(src_path)
     fixed = _remove_parameter_overrides(text)
-
-    with open(dst_path, "w", encoding="utf-8") as dst:
-        dst.write(fixed)
+    write_text_maybe_gzip(dst_path, fixed)
 
     return True
 

@@ -1,11 +1,10 @@
 #!/usr/bin/env python
-# -*- encoding: utf-8 -*-
 import os
 
-from chipcompiler.data import (
-    Workspace, WorkspaceStep, Checklist, StepEnum, CheckState
-)
+from chipcompiler.data import Checklist, CheckState, StepEnum, Workspace, WorkspaceStep
 from chipcompiler.utility import json_read
+from chipcompiler.utility.gzip import read_text_maybe_gzip
+
 
 class YosysChecklist:
     CHECKLIST_ITEMS = {
@@ -126,9 +125,8 @@ class YosysSynthesisChecklist(YosysChecklist):
             return True
 
         try:
-            with open(path, "r", encoding="utf-8", errors="ignore") as file:
-                content = file.read()
-        except OSError:
+            content = read_text_maybe_gzip(path)
+        except (OSError, EOFError):
             return False
 
         return all(token in content for token in text_tokens)
@@ -147,17 +145,13 @@ class YosysSynthesisChecklist(YosysChecklist):
         stat = json_read(self.workspace_step.feature.get("stat", ""))
 
         try:
-            with open(self.workspace_step.log.get("file", ""),
-                      "r", encoding="utf-8", errors="ignore") as file:
-                log_text = file.read()
-        except OSError:
+            log_text = read_text_maybe_gzip(self.workspace_step.log.get("file", ""))
+        except (OSError, EOFError):
             log_text = ""
 
         try:
-            with open(self.workspace_step.output.get("verilog", ""),
-                      "r", encoding="utf-8", errors="ignore") as file:
-                netlist_text = file.read()
-        except OSError:
+            netlist_text = read_text_maybe_gzip(self.workspace_step.output.get("verilog", ""))
+        except (OSError, EOFError):
             netlist_text = ""
 
         input_verilog = self.workspace_step.input.get("verilog", "")
