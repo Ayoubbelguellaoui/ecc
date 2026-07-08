@@ -21,8 +21,10 @@ class WorkspaceCreateRequest:
     parameters: dict = field(default_factory=dict)
     origin_def: str = ""
     origin_verilog: str = ""
+    sdc: str = ""
     filelist: str = ""
     rtl_list: list[str] = field(default_factory=list)
+    flow_config: dict = field(default_factory=dict)
 
 
 def create_request_from_json(path: str) -> WorkspaceCreateRequest:
@@ -32,11 +34,14 @@ def create_request_from_json(path: str) -> WorkspaceCreateRequest:
         directory=data.get("directory", ""),
         pdk=data.get("pdk", ""),
         pdk_root=data.get("pdk_root", ""),
+        pdk_json=data.get("pdk_json", ""),
         parameters=data.get("parameters", {}),
         origin_def=data.get("origin_def", ""),
         origin_verilog=data.get("origin_verilog", ""),
+        sdc=data.get("sdc", ""),
         filelist=data.get("filelist", ""),
         rtl_list=_normalize_rtl_list(data.get("rtl_list", [])),
+        flow_config=_normalize_dict(data.get("flow_config", {})),
     )
 
 
@@ -47,6 +52,7 @@ def create_request_from_flags(
     pdk_json: str | None = None,
     origin_def: str | None = None,
     origin_verilog: str | None = None,
+    sdc: str | None = None,
     filelist: str | None = None,
     rtl: Sequence[str] | None = None,
     param_json: str | None = None,
@@ -74,6 +80,7 @@ def create_request_from_flags(
         parameters=parameters,
         origin_def=origin_def or "",
         origin_verilog=origin_verilog or "",
+        sdc=sdc or "",
         filelist=filelist or "",
         rtl_list=_resolve_rtl_flags(rtl or []),
     )
@@ -87,6 +94,7 @@ def create_request(
     pdk_json: str | None = None,
     origin_def: str | None = None,
     origin_verilog: str | None = None,
+    sdc: str | None = None,
     filelist: str | None = None,
     rtl: Sequence[str] | None = None,
     param_json: str | None = None,
@@ -102,6 +110,7 @@ def create_request(
         pdk_json,
         origin_def,
         origin_verilog,
+        sdc,
         filelist,
         param_json,
         design,
@@ -120,6 +129,7 @@ def create_request(
         pdk_json=pdk_json,
         origin_def=origin_def,
         origin_verilog=origin_verilog,
+        sdc=sdc,
         filelist=filelist,
         rtl=rtl,
         param_json=param_json,
@@ -200,6 +210,10 @@ def _normalize_rtl_list(rtl_list) -> list[str]:
     return result
 
 
+def _normalize_dict(value) -> dict:
+    return value if isinstance(value, dict) else {}
+
+
 def _resolve_rtl_flags(rtl_paths: Sequence[str]) -> list[str]:
     result = []
     for path in rtl_paths:
@@ -218,7 +232,7 @@ def _resolve_request_path(path: str, base_dir: str) -> str:
 
 
 def _resolve_request_paths(data: dict, base_dir: str) -> None:
-    for field_name in ("origin_def", "origin_verilog", "filelist"):
+    for field_name in ("origin_def", "origin_verilog", "sdc", "filelist", "pdk_json"):
         path = data.get(field_name)
         if path:
             data[field_name] = _resolve_request_path(path, base_dir)

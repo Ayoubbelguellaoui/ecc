@@ -1,4 +1,5 @@
 import os
+import tempfile
 from pathlib import Path
 
 from chipcompiler.utility.path import path_is_within, stringify_paths
@@ -23,24 +24,41 @@ def create_workspace_from_request(request: WorkspaceCreateRequest) -> dict:
                 message=[f"missing required field: {missing[0]}"],
             )
 
-        input_filelist = request.filelist
-        if not input_filelist:
-            rtl_paths = normalize_rtl_list(request.rtl_list)
-            if rtl_paths:
-                input_filelist = write_filelist(request.directory, rtl_paths)
+        if _workspace_directory_has_existing_data(request.directory):
+            return workspace_response(
+                "create_workspace",
+                "failed",
+                message=[f"workspace already exists: {os.path.abspath(request.directory)}"],
+            )
 
-        import chipcompiler.data as data_api
+        temp_filelist_dir = None
+        try:
+            input_filelist = request.filelist
+            if not input_filelist:
+                rtl_paths = normalize_rtl_list(request.rtl_list)
+                if rtl_paths:
+                    temp_filelist_dir = tempfile.TemporaryDirectory(
+                        prefix="ecc-workspace-filelist-"
+                    )
+                    input_filelist = write_filelist(temp_filelist_dir.name, rtl_paths)
 
-        workspace = data_api.create_workspace(
-            directory=request.directory,
-            pdk=request.pdk,
-            parameters=request.parameters,
-            origin_def=request.origin_def,
-            origin_verilog=request.origin_verilog,
-            input_filelist=input_filelist,
-            pdk_root=request.pdk_root,
-            pdk_json=request.pdk_json,
-        )
+            import chipcompiler.data as data_api
+
+            workspace = data_api.create_workspace(
+                directory=request.directory,
+                pdk=request.pdk,
+                parameters=request.parameters,
+                origin_def=request.origin_def,
+                origin_verilog=request.origin_verilog,
+                sdc=request.sdc,
+                input_filelist=input_filelist,
+                pdk_root=request.pdk_root,
+                pdk_json=request.pdk_json,
+                flow_config=request.flow_config,
+            )
+        finally:
+            if temp_filelist_dir is not None:
+                temp_filelist_dir.cleanup()
     except InputError as exc:
         return workspace_response("create_workspace", exc.response, message=[str(exc)])
     except Exception as exc:
@@ -74,6 +92,22 @@ def create_workspace_from_request(request: WorkspaceCreateRequest) -> dict:
         data={"directory": directory, "workspace_id": directory},
         message=[f"create workspace success : {directory}"],
     )
+
+
+def _workspace_directory_has_existing_data(directory: str) -> bool:
+    workspace_dir = Path(directory).expanduser()
+    if not workspace_dir.exists():
+        return False
+    if not workspace_dir.is_dir():
+        return True
+
+    try:
+        next(workspace_dir.iterdir())
+    except StopIteration:
+        return False
+    except OSError:
+        return True
+    return True
 
 
 def load_workspace(directory: str) -> dict:

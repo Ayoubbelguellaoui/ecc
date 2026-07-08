@@ -138,8 +138,13 @@ def _workspace(directory):
     )
 
 
-def _install_runtime_mocks(monkeypatch, tmp_path):
-    capture = {"create_kwargs": None, "loaded": []}
+def _install_runtime_mocks(monkeypatch, tmp_path, create_workspace_files=True):
+    capture = {
+        "create_kwargs": None,
+        "input_filelist_lines": [],
+        "workspace_entries_when_create_called": [],
+        "loaded": [],
+    }
 
     DummyFlow.instances = []
     DummyFlow.next_run_states = []
@@ -149,6 +154,15 @@ def _install_runtime_mocks(monkeypatch, tmp_path):
 
     def fake_create_workspace(**kwargs):
         capture["create_kwargs"] = kwargs
+        input_filelist = kwargs.get("input_filelist")
+        if input_filelist and os.path.exists(input_filelist):
+            with open(input_filelist, encoding="utf-8") as f:
+                capture["input_filelist_lines"] = f.read().splitlines()
+        workspace_dir = os.path.abspath(kwargs["directory"])
+        if os.path.isdir(workspace_dir):
+            capture["workspace_entries_when_create_called"] = sorted(
+                os.listdir(workspace_dir)
+            )
         return _workspace(os.path.abspath(kwargs["directory"]))
 
     def fake_load_workspace(directory):
@@ -166,15 +180,16 @@ def _install_runtime_mocks(monkeypatch, tmp_path):
     )
 
     ws = tmp_path / "workspace"
-    (ws / "home").mkdir(parents=True)
-    (ws / "home" / "parameters.json").write_text("{}")
-    (ws / "home" / "flow.json").write_text('{"steps":[]}')
-    (ws / "home" / "home.json").write_text("{}")
+    if create_workspace_files:
+        (ws / "home").mkdir(parents=True)
+        (ws / "home" / "parameters.json").write_text("{}")
+        (ws / "home" / "flow.json").write_text('{"steps":[]}')
+        (ws / "home" / "home.json").write_text("{}")
     return capture, ws
 
 
 def test_create_input_json_success_writes_server_shape(monkeypatch, tmp_path, capsys):
-    capture, ws = _install_runtime_mocks(monkeypatch, tmp_path)
+    capture, ws = _install_runtime_mocks(monkeypatch, tmp_path, create_workspace_files=False)
     request_path = tmp_path / "request.json"
     request_path.write_text(
         json.dumps(
@@ -205,6 +220,93 @@ def test_create_input_json_success_writes_server_shape(monkeypatch, tmp_path, ca
     assert capture["create_kwargs"]["input_filelist"] == ""
     assert DummyFlow.instances[0].created
     assert DummyFlow.instances[0].added_steps == [("Synthesis", "yosys", "Unstart")]
+
+
+def test_create_rejects_existing_non_empty_workspace_directory(monkeypatch, tmp_path, capsys):
+    capture, ws = _install_runtime_mocks(monkeypatch, tmp_path)
+    request_path = tmp_path / "request.json"
+    request_path.write_text(
+        json.dumps(
+            {
+                "directory": str(ws),
+                "pdk": "ics55",
+                "parameters": {"Design": "gcd", "Top module": "gcd"},
+                "rtl_list": [],
+            }
+        )
+    )
+
+    rc = cli_main.run(["workspace", "create", "--input-json", str(request_path), "--json"])
+
+    data = _response(capsys)
+    assert rc == 1
+    assert data["cmd"] == "create_workspace"
+    assert data["response"] == "failed"
+    assert "workspace already exists" in data["message"][0]
+    assert capture["create_kwargs"] is None
+
+
+def test_create_input_json_forwards_flow_config(monkeypatch, tmp_path, capsys):
+    capture, ws = _install_runtime_mocks(monkeypatch, tmp_path, create_workspace_files=False)
+    request_path = tmp_path / "request.json"
+    flow_config = {
+        "start_step": "fixFanout",
+        "end_step": "DRC",
+        "steps": ["fixFanout", "place", "CTS", "drc"],
+    }
+    request_path.write_text(
+        json.dumps(
+            {
+                "directory": str(ws),
+                "pdk": "ics55",
+                "pdk_root": "/pdk",
+                "parameters": {"Design": "gcd", "Top module": "gcd"},
+                "origin_def": "",
+                "origin_verilog": "in.v",
+                "flow_config": flow_config,
+            }
+        )
+    )
+
+    rc = cli_main.run(["workspace", "create", "--input-json", str(request_path), "--json"])
+
+    data = _response(capsys)
+    assert rc == 0
+    assert data["response"] == "success"
+    assert capture["create_kwargs"]["flow_config"] == flow_config
+
+
+def test_create_input_json_forwards_explicit_sdc_and_pdk_json(monkeypatch, tmp_path, capsys):
+    capture, ws = _install_runtime_mocks(monkeypatch, tmp_path, create_workspace_files=False)
+    project = tmp_path / "project"
+    project.mkdir()
+    request_path = project / "request.json"
+    request_path.write_text(
+        json.dumps(
+            {
+                "directory": str(ws),
+                "pdk": "ics55",
+                "pdk_root": "/pdk",
+                "pdk_json": "config/pdk.json",
+                "parameters": {"Design": "gcd", "Top module": "gcd"},
+                "origin_def": "steps/Floorplan_ecc/output/gcd_Floorplan.def.gz",
+                "origin_verilog": "steps/Floorplan_ecc/output/gcd_Floorplan.v.gz",
+                "sdc": "origin/gcd.sdc",
+                "flow_config": {
+                    "start_step": "fixFanout",
+                    "end_step": "legalization",
+                },
+            }
+        )
+    )
+
+    rc = cli_main.run(["workspace", "create", "--input-json", str(request_path), "--json"])
+
+    data = _response(capsys)
+    assert rc == 0
+    assert data["response"] == "success"
+    assert capture["create_kwargs"]["pdk_json"] == str(project / "config" / "pdk.json")
+    assert capture["create_kwargs"]["sdc"] == str(project / "origin" / "gcd.sdc")
 
 
 def test_create_returns_normalized_workspace_directory(monkeypatch, tmp_path, capsys):
@@ -238,7 +340,7 @@ def test_create_returns_normalized_workspace_directory(monkeypatch, tmp_path, ca
 
 
 def test_create_input_json_from_stdin(monkeypatch, tmp_path, capsys):
-    capture, ws = _install_runtime_mocks(monkeypatch, tmp_path)
+    capture, ws = _install_runtime_mocks(monkeypatch, tmp_path, create_workspace_files=False)
     monkeypatch.setattr(
         "sys.stdin",
         SimpleNamespace(
@@ -266,7 +368,7 @@ def test_create_input_json_resolves_relative_rtl_from_json_dir(
     tmp_path,
     capsys,
 ):
-    capture, ws = _install_runtime_mocks(monkeypatch, tmp_path)
+    capture, ws = _install_runtime_mocks(monkeypatch, tmp_path, create_workspace_files=False)
     project = tmp_path / "project"
     project.mkdir()
     request_path = project / "request.json"
@@ -287,7 +389,10 @@ def test_create_input_json_resolves_relative_rtl_from_json_dir(
     assert rc == 0
     assert data["response"] == "success"
     assert os.path.basename(capture["create_kwargs"]["input_filelist"]) == "filelist"
-    assert (ws / "filelist").read_text().splitlines() == [str(project / "rtl" / "top.v")]
+    assert not str(capture["create_kwargs"]["input_filelist"]).startswith(str(ws))
+    assert capture["input_filelist_lines"] == [str(project / "rtl" / "top.v")]
+    assert capture["workspace_entries_when_create_called"] == []
+    assert not (ws / "filelist").exists()
 
 
 def test_create_input_json_resolves_relative_filelist_from_json_dir(
@@ -295,7 +400,7 @@ def test_create_input_json_resolves_relative_filelist_from_json_dir(
     tmp_path,
     capsys,
 ):
-    capture, ws = _install_runtime_mocks(monkeypatch, tmp_path)
+    capture, ws = _install_runtime_mocks(monkeypatch, tmp_path, create_workspace_files=False)
     project = tmp_path / "project"
     project.mkdir()
     request_path = project / "request.json"
@@ -324,7 +429,7 @@ def test_create_input_json_resolves_relative_origin_inputs_from_json_dir(
     tmp_path,
     capsys,
 ):
-    capture, ws = _install_runtime_mocks(monkeypatch, tmp_path)
+    capture, ws = _install_runtime_mocks(monkeypatch, tmp_path, create_workspace_files=False)
     project = tmp_path / "project"
     project.mkdir()
     request_path = project / "request.json"
@@ -473,7 +578,7 @@ def test_sync_config_cli_syncs_parameters_and_refreshes_when_changed(monkeypatch
 
 
 def test_create_flags_assemble_data_and_param_json(monkeypatch, tmp_path, capsys):
-    capture, ws = _install_runtime_mocks(monkeypatch, tmp_path)
+    capture, ws = _install_runtime_mocks(monkeypatch, tmp_path, create_workspace_files=False)
     params_path = tmp_path / "params.json"
     params_path.write_text(
         json.dumps(
@@ -539,10 +644,13 @@ def test_create_flags_assemble_data_and_param_json(monkeypatch, tmp_path, capsys
         "Core": {"Margin": [1, 2]},
     }
     assert os.path.basename(kwargs["input_filelist"]) == "filelist"
-    assert (ws / "filelist").read_text().splitlines() == [
+    assert not str(kwargs["input_filelist"]).startswith(str(ws))
+    assert capture["input_filelist_lines"] == [
         str(project / "a.v"),
         str(project / "b.v"),
     ]
+    assert capture["workspace_entries_when_create_called"] == []
+    assert not (ws / "filelist").exists()
 
 
 def test_create_rejects_mixed_input_json_and_field_flags(tmp_path, capsys):
