@@ -1,6 +1,5 @@
 import json
 import os
-import re
 
 from chipcompiler.cli.core.output import (
     normalize_state,
@@ -62,31 +61,27 @@ def get_run_status(flow_data: dict) -> str:
     return "failed"
 
 
-ERROR_PATTERNS = re.compile(r"(error|failed|traceback)", re.IGNORECASE)
-_CLEAN_SUMMARY = re.compile(
-    r"^\s*0\s+(error|failed|warning)|^no\s+(error|failed|warning)", re.IGNORECASE
-)
-
-
-def filter_errors(lines: list[str]) -> list[str]:
-    result = []
-    for line in lines:
-        if ERROR_PATTERNS.search(line) and not _CLEAN_SUMMARY.search(line):
-            result.append(line)
-    return result
-
-
 def discover_step_dirs(run_dir: str) -> dict[str, str]:
     result = {}
     if not os.path.isdir(run_dir):
         return result
     for entry in os.listdir(run_dir):
         full = os.path.join(run_dir, entry)
-        if os.path.isdir(full) and "_" in entry:
-            name, _, tool = entry.partition("_")
-            token = normalize_step_name(name)
-            result[token] = full
+        if not os.path.isdir(full):
+            continue
+        name = step_dir_step_name(full)
+        if name is None:
+            continue
+        token = normalize_step_name(name)
+        result[token] = full
     return result
+
+
+def step_dir_step_name(step_path: str) -> str | None:
+    entry = os.path.basename(step_path)
+    if "_" not in entry:
+        return None
+    return entry.rpartition("_")[0]
 
 
 def step_dir_tool(step_path: str) -> str | None:
@@ -130,53 +125,6 @@ def read_log_file(path: str) -> list[str]:
             return f.read().splitlines()
     except OSError:
         return []
-
-
-def discover_metrics(run_dir: str, step_token: str | None = None) -> dict[str, str]:
-    step_dirs = discover_step_dirs(run_dir)
-    result = {}
-
-    if step_token is not None:
-        if step_token not in step_dirs:
-            return {}
-        tokens = [step_token]
-    else:
-        tokens = list(step_dirs.keys())
-
-    for token in tokens:
-        analysis_dir = os.path.join(step_dirs[token], "analysis")
-        if not os.path.isdir(analysis_dir):
-            continue
-        for f in os.listdir(analysis_dir):
-            if f.endswith("_metrics.json"):
-                result[token] = os.path.join(analysis_dir, f)
-                break
-
-    return result
-
-
-def read_metrics(path: str) -> dict | None:
-    try:
-        with open(path) as f:
-            data = json.load(f)
-        return data if isinstance(data, dict) else None
-    except (json.JSONDecodeError, OSError):
-        return None
-
-
-def _internal_from_token(token: str) -> str:
-    reverse = {
-        "synthesis": "Synthesis",
-        "floorplan": "Floorplan",
-        "fixfanout": "fixFanout",
-        "placement": "place",
-        "cts": "CTS",
-        "legalization": "legalization",
-        "routing": "route",
-        "drc": "drc",
-        "filler": "filler",
-    }
-    return reverse.get(token, token)
 
 
 def listing_step_order(run_dir: str) -> list[str]:

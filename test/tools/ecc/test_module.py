@@ -4,8 +4,8 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
-from chipcompiler.data import OriginDesign, StepEnum, Workspace
 import chipcompiler.utility as chipcompiler_utility
+from chipcompiler.data import OriginDesign, StepEnum, Workspace
 from chipcompiler.tools.ecc import plot as ecc_plot
 from chipcompiler.tools.ecc import service as ecc_service
 from chipcompiler.tools.ecc.builder import build_step, build_step_space
@@ -105,6 +105,15 @@ def test_ecc_tools_module_imports_installed_native_extension():
     assert module.get_ecc() is not None
 
 
+def test_close_resets_native_data_without_flow_exit():
+    module = ECCToolsModule.__new__(ECCToolsModule)
+    module.ecc = FakeEcc()
+
+    module.close()
+
+    assert module.ecc.calls == [("reset_data", (), {})]
+
+
 def test_init_rcx_passes_pdk_when_configured():
     module = ECCToolsModule.__new__(ECCToolsModule)
     module.ecc = FakeEcc()
@@ -136,10 +145,24 @@ def test_view_json_save_passes_output_options():
     module = ECCToolsModule.__new__(ECCToolsModule)
     module.ecc = FakeEcc()
 
-    assert module.view_json_save(output_dir=Path("/tmp/view_json"), json_format="compact", compress=True) is True
+    assert (
+        module.view_json_save(
+            output_dir=Path("/tmp/view_json"),
+            json_format="compact",
+            compress=True,
+        )
+        is True
+    )
 
     assert module.ecc.calls == [
-        ("view_json_save", {"output_dir": "/tmp/view_json", "json_format": "compact", "compress": True}),
+        (
+            "view_json_save",
+            {
+                "output_dir": "/tmp/view_json",
+                "json_format": "compact",
+                "compress": True,
+            },
+        ),
     ]
 
 
@@ -147,10 +170,22 @@ def test_view_json_apply_edits_passes_compress_option():
     module = ECCToolsModule.__new__(ECCToolsModule)
     module.ecc = FakeEcc()
 
-    assert module.view_json_apply_edits(edits_path=Path("/tmp/view_json/edits/layout_edits.json.gz"), compress=True) is True
+    assert (
+        module.view_json_apply_edits(
+            edits_path=Path("/tmp/view_json/edits/layout_edits.json.gz"),
+            compress=True,
+        )
+        is True
+    )
 
     assert module.ecc.calls == [
-        ("view_json_apply_edits", {"edits_path": "/tmp/view_json/edits/layout_edits.json.gz", "compress": True}),
+        (
+            "view_json_apply_edits",
+            {
+                "edits_path": "/tmp/view_json/edits/layout_edits.json.gz",
+                "compress": True,
+            },
+        ),
     ]
 
 

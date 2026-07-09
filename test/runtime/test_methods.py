@@ -1,0 +1,108 @@
+from dataclasses import is_dataclass
+
+import chipcompiler.runtime.requests as requests
+from chipcompiler.runtime.requests import DbEnsureRequest, DbReleaseRequest, WorkspaceOpenRequest
+from chipcompiler.runtime.server import BASE_CAPABILITIES, RuntimeServer
+
+
+def test_runtime_method_registry_contains_current_methods_once():
+    from chipcompiler.runtime.methods import RUNTIME_METHODS, runtime_method_names
+
+    expected_methods = (
+        "workspace.create",
+        "workspace.open",
+        "workspace.close",
+        "workspace.home",
+        "workspace.info",
+        "workspace.refresh_config",
+        "workspace.sync_config",
+        "workspace.reset_flow",
+        "flow.run",
+        "flow.run_step",
+    )
+
+    assert runtime_method_names() == expected_methods
+    assert len(runtime_method_names()) == len(set(runtime_method_names()))
+    assert len(RUNTIME_METHODS) == len(expected_methods)
+
+
+def test_persistent_db_method_registry_is_separate_and_opt_in():
+    from chipcompiler.runtime.methods import (
+        PERSISTENT_DB_METHODS,
+        persistent_db_method_names,
+        runtime_method_names,
+    )
+
+    expected_methods = ("db.ensure", "db.release")
+
+    assert persistent_db_method_names() == expected_methods
+    assert runtime_method_names(persistent_db_enabled=True)[-2:] == expected_methods
+    assert "db.ensure" not in runtime_method_names()
+    assert len(PERSISTENT_DB_METHODS) == len(expected_methods)
+
+
+def test_runtime_method_registry_entries_are_typed():
+    from chipcompiler.runtime.methods import runtime_methods
+
+    for spec in runtime_methods(persistent_db_enabled=True):
+        assert spec.method_name
+        assert isinstance(spec.request_model, type)
+        assert is_dataclass(spec.request_model)
+        assert spec.handler_name
+
+
+def test_runtime_method_lookup_returns_spec():
+    from chipcompiler.runtime.methods import runtime_method_by_name
+
+    spec = runtime_method_by_name("workspace.open")
+
+    assert spec is not None
+    assert spec.request_model is WorkspaceOpenRequest
+    assert spec.handler_name == "open_workspace"
+    assert runtime_method_by_name("workspace.signoff") is None
+    assert runtime_method_by_name("db.ensure") is None
+
+
+def test_persistent_db_method_lookup_requires_enabled_capability():
+    from chipcompiler.runtime.methods import runtime_method_by_name
+
+    ensure_spec = runtime_method_by_name("db.ensure", persistent_db_enabled=True)
+    release_spec = runtime_method_by_name("db.release", persistent_db_enabled=True)
+
+    assert ensure_spec is not None
+    assert ensure_spec.request_model is DbEnsureRequest
+    assert ensure_spec.handler_name == "db_ensure"
+    assert release_spec is not None
+    assert release_spec.request_model is DbReleaseRequest
+    assert release_spec.handler_name == "db_release"
+
+
+def test_default_server_capabilities_are_generated_from_runtime_registry():
+    from chipcompiler.runtime.methods import runtime_method_names
+
+    server = RuntimeServer()
+
+    assert server.capabilities == (*BASE_CAPABILITIES, *runtime_method_names())
+
+
+def test_persistent_db_server_capabilities_include_db_methods():
+    from chipcompiler.runtime.methods import runtime_method_names
+
+    server = RuntimeServer(persistent_db_enabled=True)
+
+    assert server.capabilities == (
+        *BASE_CAPABILITIES,
+        *runtime_method_names(persistent_db_enabled=True),
+    )
+    assert "db.ensure" in server.capabilities
+    assert "db.release" in server.capabilities
+
+
+def test_requests_module_does_not_own_runtime_method_table():
+    assert not hasattr(requests, "REQUEST_MODELS")
+
+
+def test_server_module_does_not_own_runtime_method_table():
+    import chipcompiler.runtime.server as server
+
+    assert not hasattr(server, "RUNTIME_METHODS")

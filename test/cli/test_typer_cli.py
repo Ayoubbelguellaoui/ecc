@@ -2,6 +2,8 @@ import dataclasses
 import json
 from importlib import metadata
 
+import pytest
+
 from chipcompiler.cli import main as cli_main
 from chipcompiler.cli.core.inputs import OutputOptions, ProjectOptions
 from chipcompiler.cli.core.invocation import execute_command
@@ -19,14 +21,14 @@ def test_root_help_returns_zero_and_lists_commands(capsys):
         "run",
         "status",
         "log",
-        "metrics",
-        "artifacts",
         "config",
-        "diagnose",
         "param",
-        "workspace",
+        "rpc",
     ):
         assert command in out
+    for removed_command in ("metrics", "artifacts", "diagnose"):
+        assert removed_command not in out
+    assert "workspace" not in out
 
 
 def test_root_version_returns_single_line(capsys):
@@ -90,17 +92,16 @@ def test_param_help_returns_zero_and_lists_subcommands(capsys):
         assert command in out
 
 
-def test_workspace_help_returns_zero_and_lists_subcommands(capsys):
-    rc = cli_main.run(["workspace", "--help"])
-
-    out = capsys.readouterr().out
-    assert rc == 0
-    for command in ("create", "load", "run-flow", "run-step", "get-info", "get-home"):
-        assert command in out
-
-
 def test_unknown_command_returns_nonzero_without_system_exit(capsys):
     rc = cli_main.run(["missing-command"])
+
+    assert rc != 0
+    assert "No such command" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("command", ("metrics", "artifacts", "diagnose"))
+def test_removed_commands_return_unknown_command(command, capsys):
+    rc = cli_main.run([command])
 
     assert rc != 0
     assert "No such command" in capsys.readouterr().err
@@ -191,50 +192,45 @@ def test_run_set_remains_repeatable(monkeypatch, tmp_path):
     }
 
 
-def test_workspace_routes_through_root_typer(monkeypatch):
+def test_rpc_routes_through_root_typer(monkeypatch):
     seen = {}
 
-    def fake_invoke(argv, *, keep_workspace_json_stdio_redirect=False):
+    def fake_invoke(argv):
         seen["argv"] = argv
-        seen["keep_workspace_json_stdio_redirect"] = keep_workspace_json_stdio_redirect
         return 17
 
     monkeypatch.setattr("chipcompiler.cli.app.invoke_typer_app", fake_invoke)
 
-    rc = cli_main.run(["workspace", "create", "--pdk-root", "/pdk"])
+    rc = cli_main.run(["rpc", "serve", "--stdio"])
 
     assert rc == 17
-    assert seen["argv"] == ["workspace", "create", "--pdk-root", "/pdk"]
-    assert seen["keep_workspace_json_stdio_redirect"] is False
+    assert seen["argv"] == ["rpc", "serve", "--stdio"]
 
 
-def test_run_default_argv_keeps_programmatic_stdio_redirect_disabled(monkeypatch):
+def test_run_default_argv_uses_sys_argv(monkeypatch):
     seen = {}
 
-    def fake_invoke(argv, *, keep_workspace_json_stdio_redirect=False):
+    def fake_invoke(argv):
         seen["argv"] = argv
-        seen["keep_workspace_json_stdio_redirect"] = keep_workspace_json_stdio_redirect
         return 17
 
-    monkeypatch.setattr(cli_main.sys, "argv", ["ecc", "workspace", "load", "--json"])
+    monkeypatch.setattr(cli_main.sys, "argv", ["ecc", "rpc", "serve", "--stdio"])
     monkeypatch.setattr("chipcompiler.cli.app.invoke_typer_app", fake_invoke)
 
     rc = cli_main.run()
 
     assert rc == 17
-    assert seen["argv"] == ["workspace", "load", "--json"]
-    assert seen["keep_workspace_json_stdio_redirect"] is False
+    assert seen["argv"] == ["rpc", "serve", "--stdio"]
 
 
-def test_main_enables_cli_stdio_redirect(monkeypatch):
+def test_main_exits_with_run_code(monkeypatch):
     seen = {}
 
-    def fake_invoke(argv, *, keep_workspace_json_stdio_redirect=False):
+    def fake_invoke(argv):
         seen["argv"] = argv
-        seen["keep_workspace_json_stdio_redirect"] = keep_workspace_json_stdio_redirect
         return 17
 
-    monkeypatch.setattr(cli_main.sys, "argv", ["ecc", "workspace", "load", "--json"])
+    monkeypatch.setattr(cli_main.sys, "argv", ["ecc", "rpc", "serve", "--stdio"])
     monkeypatch.setattr("chipcompiler.cli.app.invoke_typer_app", fake_invoke)
 
     try:
@@ -245,8 +241,7 @@ def test_main_enables_cli_stdio_redirect(monkeypatch):
         raise AssertionError("main() did not exit")
 
     assert code == 17
-    assert seen["argv"] == ["workspace", "load", "--json"]
-    assert seen["keep_workspace_json_stdio_redirect"] is True
+    assert seen["argv"] == ["rpc", "serve", "--stdio"]
 
 
 def test_old_top_level_workspace_form_is_root_parser_error(capsys):
@@ -263,7 +258,7 @@ def test_run_workspace_like_flag_is_run_parser_error(capsys):
     assert "no such option" in capsys.readouterr().err.lower()
 
 
-def test_non_workspace_command_handler_still_returns_command_result(monkeypatch, tmp_path, capsys):
+def test_status_command_handler_still_returns_command_result(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(
         "chipcompiler.cli.core.invocation.resolve_project_dir",
         lambda project: str(tmp_path),
@@ -273,25 +268,16 @@ def test_non_workspace_command_handler_still_returns_command_result(monkeypatch,
         lambda project_dir, run_id: (str(tmp_path / "runs" / "default"), run_id),
     )
 
-    def fake_diagnose(command_input, ctx):
-        return CommandResult.ok(
-            [
-                {"command": "diagnose", "input_type": type(command_input).__name__, "status": "ok"},
-            ]
-        )
+    def fake_status(command_input, ctx):
+        return CommandResult.ok([{"command": "status", "status": "ok"}])
 
-    monkeypatch.setattr(
-        "chipcompiler.cli.command_handlers.inspect.diagnose",
-        fake_diagnose,
-    )
+    monkeypatch.setattr("chipcompiler.cli.command_handlers.inspect.status", fake_status)
 
-    rc = cli_main.run(["diagnose", "--json"])
+    rc = cli_main.run(["status", "--json"])
 
     data = json.loads(capsys.readouterr().out)
     assert rc == 0
-    assert data == {
-        "records": [{"command": "diagnose", "input_type": "DiagnoseInput", "status": "ok"}],
-    }
+    assert data == {"records": [{"command": "status", "status": "ok"}]}
 
 
 def test_param_callback_passes_typed_input(monkeypatch, tmp_path, capsys):

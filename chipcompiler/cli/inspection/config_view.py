@@ -168,9 +168,10 @@ def build_step_config_items(
         _safe_steps,
         discover_step_dirs,
         read_flow_json,
+        step_dir_step_name,
         step_dir_tool,
     )
-    from chipcompiler.cli.workspace.config_view import workspace_config_files
+    from chipcompiler.data import step_config_paths
 
     base_dir = project_dir or os.path.dirname(os.path.dirname(run_dir))
     flow_data = read_flow_json(run_dir)
@@ -187,14 +188,22 @@ def build_step_config_items(
         return [{"kind": "error", "status": "unknown_step", "step": step_token}], 1
 
     step_info = flow_step_by_token.get(step_token, {})
+    data_step = step_info.get("name")
     tool = step_info.get("tool")
-    if tool is None and step_token in step_dirs:
-        tool = step_dir_tool(step_dirs[step_token])
+    step_dir = step_dirs.get(step_token)
+    if tool is None and step_dir is not None:
+        tool = step_dir_tool(step_dir)
+    if data_step is None and step_dir is not None:
+        data_step = step_dir_step_name(step_dir)
 
     items = []
     display_run = run_id or "default"
 
-    for fpath in workspace_config_files(run_dir, step_token, tool):
+    config_paths = ()
+    if data_step is not None:
+        config_paths = step_config_paths(run_dir, data_step, tool, existing_only=True)
+
+    for fpath in config_paths:
         items.append(
             {
                 "kind": "config",
@@ -202,7 +211,7 @@ def build_step_config_items(
                 "step": step_token,
                 "role": "config",
                 "run": display_run,
-                "path": os.path.relpath(fpath, base_dir),
+                "path": os.path.relpath(str(fpath), base_dir),
                 "source": "workspace_config",
                 "inspect_cmd": disclosure_cmd(
                     f"ecc config {step_token} --resolved --json", project, run_id
@@ -217,7 +226,6 @@ def build_step_config_items(
                 "scope": "step",
                 "step": step_token,
                 "config_status": "none",
-                "artifacts": disclosure_cmd(f"ecc artifacts {step_token}", project, run_id),
             }
         ], 0
 

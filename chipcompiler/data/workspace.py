@@ -4,7 +4,7 @@
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 from .parameter import (
     Parameters,
     get_parameters, 
@@ -104,30 +104,105 @@ def log_workspace_step(step : WorkspaceStep, logger : Logger):
     logger.log_separator()
 
 
+_WORKSPACE_CONFIG_FILENAMES: Final[dict[str, str]] = {
+    "flow": "flow_config.json",
+    "db": "db_default_config.json",
+    StepEnum.CTS.value: "cts_default_config.json",
+    StepEnum.DRC.value: "drc_default_config.json",
+    StepEnum.FLOORPLAN.value: "fp_default_config.json",
+    StepEnum.NETLIST_OPT.value: "no_default_config_fixfanout.json",
+    StepEnum.PLACEMENT.value: "pl_default_config.json",
+    StepEnum.PNP.value: "pnp_default_config.json",
+    StepEnum.ROUTING.value: "rt_default_config.json",
+    StepEnum.TIMING_OPT_DRV.value: "to_default_config_drv.json",
+    StepEnum.TIMING_OPT_HOLD.value: "to_default_config_hold.json",
+    StepEnum.TIMING_OPT_SETUP.value: "to_default_config_setup.json",
+    StepEnum.LEGALIZATION.value: "pl_default_config.json",
+    StepEnum.FILLER.value: "pl_default_config.json",
+    StepEnum.RCX.value: "rcx.json",
+    StepEnum.STA.value: "sta.json",
+    "dreamplace": "dreamplace.json",
+}
+
+_STEP_BY_VALUE: Final[dict[str, StepEnum]] = {
+    step.value: step for step in StepEnum
+}
+
+_STEP_CONFIG_KEYS: Final[dict[tuple[StepEnum, str], tuple[str, ...]]] = {
+    (StepEnum.FLOORPLAN, "ecc"): ("flow", "db", StepEnum.FLOORPLAN.value),
+    (StepEnum.NETLIST_OPT, "ecc"): ("flow", "db", StepEnum.NETLIST_OPT.value),
+    (StepEnum.PLACEMENT, "ecc"): ("flow", "db", StepEnum.PLACEMENT.value),
+    (StepEnum.CTS, "ecc"): ("flow", "db", StepEnum.CTS.value),
+    (StepEnum.ROUTING, "ecc"): ("flow", "db", StepEnum.ROUTING.value),
+    (StepEnum.DRC, "ecc"): ("flow", "db", StepEnum.DRC.value),
+    (StepEnum.LEGALIZATION, "ecc"): ("flow", "db", StepEnum.PLACEMENT.value),
+    (StepEnum.FILLER, "ecc"): ("flow", "db", StepEnum.PLACEMENT.value),
+    (StepEnum.PNP, "ecc"): ("flow", "db", StepEnum.PNP.value),
+    (StepEnum.TIMING_OPT_DRV, "ecc"): ("flow", "db", StepEnum.TIMING_OPT_DRV.value),
+    (StepEnum.TIMING_OPT_HOLD, "ecc"): ("flow", "db", StepEnum.TIMING_OPT_HOLD.value),
+    (StepEnum.TIMING_OPT_SETUP, "ecc"): (
+        "flow",
+        "db",
+        StepEnum.TIMING_OPT_SETUP.value,
+    ),
+    (StepEnum.RCX, "ecc"): ("flow", "db", StepEnum.RCX.value),
+    (StepEnum.STA, "ecc"): ("flow", "db", StepEnum.RCX.value, StepEnum.STA.value),
+    (StepEnum.PLACEMENT, "dreamplace"): ("dreamplace",),
+    (StepEnum.LEGALIZATION, "dreamplace"): ("dreamplace",),
+}
+
+
+def _workspace_step_enum(step: str | StepEnum) -> StepEnum | None:
+    if isinstance(step, StepEnum):
+        return step
+    return _STEP_BY_VALUE.get(step)
+
+
+def workspace_config_paths(workspace_dir: str | Path) -> dict[str, Path]:
+    config_dir = Path(workspace_dir) / "config"
+    return {
+        "dir": config_dir,
+        **{
+            config_key: config_dir / filename
+            for config_key, filename in _WORKSPACE_CONFIG_FILENAMES.items()
+        },
+    }
+
+
+def workspace_config_path(workspace_dir: str | Path, config_key: str) -> Path | None:
+    return workspace_config_paths(workspace_dir).get(config_key)
+
+
+def step_config_keys(step: str | StepEnum, tool: str | None) -> tuple[str, ...]:
+    step_enum = _workspace_step_enum(step)
+    if step_enum is None or tool is None:
+        return ()
+    return _STEP_CONFIG_KEYS.get((step_enum, tool), ())
+
+
+def step_config_paths(
+    workspace_dir: str | Path,
+    step: str | StepEnum,
+    tool: str | None,
+    *,
+    existing_only: bool = False,
+) -> tuple[Path, ...]:
+    paths = workspace_config_paths(workspace_dir)
+    result = []
+    for config_key in step_config_keys(step, tool):
+        path = paths.get(config_key)
+        if path is None:
+            continue
+        if existing_only and not path.is_file():
+            continue
+        result.append(path)
+    return tuple(result)
+
+
 def build_workspace_config_paths(workspace: Workspace) -> dict[str, Path]:
     """Build workspace-level config file paths."""
     workspace_dir = Path(workspace.directory) if workspace.directory is not None else Path("")
-    config_dir = workspace_dir / "config"
-    return {
-        "dir": config_dir,
-        "flow": config_dir / "flow_config.json",
-        "db": config_dir / "db_default_config.json",
-        f"{StepEnum.CTS.value}": config_dir / "cts_default_config.json",
-        f"{StepEnum.DRC.value}": config_dir / "drc_default_config.json",
-        f"{StepEnum.FLOORPLAN.value}": config_dir / "fp_default_config.json",
-        f"{StepEnum.NETLIST_OPT.value}": config_dir / "no_default_config_fixfanout.json",
-        f"{StepEnum.PLACEMENT.value}": config_dir / "pl_default_config.json",
-        f"{StepEnum.PNP.value}": config_dir / "pnp_default_config.json",
-        f"{StepEnum.ROUTING.value}": config_dir / "rt_default_config.json",
-        f"{StepEnum.TIMING_OPT_DRV.value}": config_dir / "to_default_config_drv.json",
-        f"{StepEnum.TIMING_OPT_HOLD.value}": config_dir / "to_default_config_hold.json",
-        f"{StepEnum.TIMING_OPT_SETUP.value}": config_dir / "to_default_config_setup.json",
-        f"{StepEnum.LEGALIZATION.value}": config_dir / "pl_default_config.json",
-        f"{StepEnum.FILLER.value}": config_dir / "pl_default_config.json",
-        f"{StepEnum.RCX.value}": config_dir / "rcx.json",
-        f"{StepEnum.STA.value}": config_dir / "sta.json",
-        "dreamplace": config_dir / "dreamplace.json",
-    }
+    return workspace_config_paths(workspace_dir)
 
 
 def build_dynamic_flow_data(flow_config: dict | None) -> dict:
@@ -368,6 +443,16 @@ def _apply_parameter_mappings_to_workspace_config(workspace: Workspace) -> None:
         json_write(path, config)
 
 
+def _coerce_legacy_dreamplace_routability_flag(workspace: Workspace, dreamplace: dict) -> None:
+    dreamplace_overrides = workspace.parameters.data.get("DreamPlace", {})
+    if isinstance(dreamplace_overrides, dict) and "routability_opt_flag" in dreamplace_overrides:
+        return
+    if "Routability opt flag" in workspace.parameters.data:
+        dreamplace["routability_opt_flag"] = _flag_to_int(
+            workspace.parameters.data["Routability opt flag"]
+        )
+
+
 def _ensure_writable(path: str):
     import os
     import stat
@@ -530,6 +615,7 @@ def refresh_workspace_config(workspace: Workspace) -> None:
     ]
     dreamplace["base_design_name"] = workspace.design.name
     dreamplace = apply_parameter_overrides(dreamplace, workspace.parameters.data)
+    _coerce_legacy_dreamplace_routability_flag(workspace, dreamplace)
     json_write(workspace.config["dreamplace"], dreamplace)
 
 
@@ -1007,9 +1093,9 @@ def create_workspace(directory : str | Path,
     if workspace.pdk.root:
         workspace.parameters.data["PDK Root"] = str(workspace.pdk.root)
     if pdk_json:
-        pdk_config_path = os.path.abspath(f"{directory}/home/pdk.json")
+        pdk_config_path = home_dir / "pdk.json"
         shutil.copy(pdk_json, pdk_config_path)
-        workspace.parameters.data["PDK Config"] = pdk_config_path
+        workspace.parameters.data["PDK Config"] = str(pdk_config_path)
 
     # save parameter
     save_parameter(workspace.parameters)

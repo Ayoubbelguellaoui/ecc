@@ -1,286 +1,280 @@
-# Workspace CLI Guide
+# Runtime Sidecar RPC Guide
 
-`ecc workspace` exposes the legacy runtime workspace API as CLI commands. Use it
-when you need to create or operate on an old-style ECC workspace directory whose
-state lives directly under the workspace root:
-
-```text
-gcd/
-├── home/
-│   ├── parameters.json
-│   ├── flow.json
-│   └── home.json
-├── origin/
-└── <step workspace directories>
-```
-
-This command group is separate from the newer project workflow used by
-`ecc init`, `ecc check`, `ecc run`, `ecc status`, and `runs/default`.
-Workspace commands do not auto-detect an `ecc.toml` project and do not remember
-a current workspace between commands.
-
-## Command Summary
+Workspace operations are exposed through the private ECC runtime sidecar:
 
 ```bash
-ecc workspace create --directory gcd --pdk ics55 --pdk-root /path/to/icsprout55-pdk --design gcd --top gcd --clock clk --freq 100
-ecc workspace load --directory gcd
-ecc workspace run-flow --directory gcd
-ecc workspace run-flow --directory gcd --rerun
-ecc workspace run-step --directory gcd --step Synthesis
-ecc workspace get-info --directory gcd --step Synthesis --id layout
-ecc workspace get-home --directory gcd
+ecc rpc serve --stdio
 ```
 
-Add `--json` to any command to get a server-shaped response object:
+Persistent ECC DB reuse is disabled by default. To expose the explicit DB
+lifecycle methods, start the sidecar with:
+
+```bash
+ecc rpc serve --stdio --persistent-db
+```
+
+The sidecar speaks JSON-RPC 2.0 over stdio. Each JSON-RPC payload is framed with
+a `Content-Length` header. Stdout is reserved for framed protocol messages;
+diagnostics and tool output belong on stderr.
+
+The legacy workspace command group and its custom server-shaped JSON envelope
+are no longer supported. Project commands such as `ecc init`, `ecc run`,
+`ecc status`, `ecc config`, and `ecc param` remain ordinary stateless CLI
+commands.
+
+## Framing
+
+Each request is UTF-8 JSON preceded by a byte length:
+
+```text
+Content-Length: 63
+
+{"jsonrpc":"2.0","method":"rpc.ping","params":{},"id":"ping-1"}
+```
+
+The server returns another framed payload:
+
+```text
+Content-Length: 52
+
+{"jsonrpc":"2.0","result":{"ok":true},"id":"ping-1"}
+```
+
+## Handshake
+
+Call `rpc.hello` first to verify protocol compatibility and discover the
+first-slice method list:
 
 ```json
 {
-  "cmd": "load_workspace",
-  "response": "success",
-  "data": {},
-  "message": []
+  "jsonrpc": "2.0",
+  "method": "rpc.hello",
+  "params": {
+    "version": 1
+  },
+  "id": "hello-1"
 }
 ```
 
-`success` and `warning` return exit code 0. `failed` and `error` return exit
-code 1.
+The result includes `version`, `eccVersion`, and `capabilities`.
+
+Default `ecc rpc serve --stdio` capabilities do not include persistent DB
+methods. When `--persistent-db` is enabled, `rpc.hello` also advertises
+`db.ensure` and `db.release`.
+
+## Open A Workspace
+
+Open an existing workspace directory:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "workspace.open",
+  "params": {
+    "directory": "/path/to/gcd"
+  },
+  "id": "open-1"
+}
+```
+
+The result returns a session identifier:
+
+```json
+{
+  "workspaceId": "workspace-1",
+  "directory": "/path/to/gcd"
+}
+```
+
+Follow-up workspace and flow calls use `workspaceId`. They do not take the
+workspace directory again unless the method explicitly documents a directory
+parameter.
+
+Opening or creating a workspace does not initialize persistent native DB state.
+Persistent DB reuse starts only after an explicit `db.ensure` call in a sidecar
+process started with `--persistent-db`.
 
 ## Create A Workspace
 
-The minimum practical `create` command needs a workspace directory, a PDK name,
-a PDK root, and design parameters:
-
-```bash
-ecc workspace create \
-  --directory gcd \
-  --pdk ics55 \
-  --pdk-root /home/Emin/Workbench/icsprout55-pdk \
-  --design gcd \
-  --top gcd \
-  --clock clk \
-  --freq 100
-```
-
-Important parameter meanings:
-
-- `--directory` is the workspace directory to create, for example `gcd`.
-- `--pdk` is the PDK name, for example `ics55`.
-- `--pdk-root` is the filesystem path to the PDK installation.
-- `--design`, `--top`, `--clock`, and `--freq` populate the standard ECC
-  design parameters.
-- `--param-json` points to a JSON object with additional ECC parameters.
-
-`--pdk /path/to/pdk` is wrong: it passes the path as the PDK name. Use
-`--pdk ics55 --pdk-root /path/to/pdk`.
-
-`--param-json` can be combined with the direct design flags. Direct flags take
-precedence when both set the same parameter, so `--top gcd_alt` overrides a
-`"Top module": "gcd"` value from the JSON file.
-
-## Add RTL Inputs
-
-For a single Verilog source, pass both `--origin-verilog` and `--rtl`:
-
-```bash
-ecc workspace create \
-  --directory gcd \
-  --pdk ics55 \
-  --pdk-root /home/Emin/Workbench/icsprout55-pdk \
-  --origin-verilog /path/to/gcd.v \
-  --rtl /path/to/gcd.v \
-  --param-json params.json
-```
-
-For multiple RTL sources, repeat `--rtl`:
-
-```bash
-ecc workspace create \
-  --directory gcd \
-  --pdk ics55 \
-  --pdk-root /home/Emin/Workbench/icsprout55-pdk \
-  --origin-verilog /path/to/top.v \
-  --rtl /path/to/top.v \
-  --rtl /path/to/block.v \
-  --rtl /path/to/package.sv \
-  --param-json params.json
-```
-
-If `--filelist` is not provided and `--rtl` is present, the CLI writes a
-workspace-local filelist and passes that to workspace creation.
-
-If you already have a filelist, use `--filelist`:
-
-```bash
-ecc workspace create \
-  --directory gcd \
-  --pdk ics55 \
-  --pdk-root /home/Emin/Workbench/icsprout55-pdk \
-  --origin-verilog /path/to/top.v \
-  --filelist /path/to/files.f \
-  --param-json params.json
-```
-
-## JSON Input
-
-For scripts and adapters, `create` can read the complete request object from a
-JSON file:
+Create accepts the workspace directory, PDK name, optional PDK paths, design
+parameters, and optional input files:
 
 ```json
 {
-  "directory": "gcd",
-  "pdk": "ics55",
-  "pdk_root": "/home/Emin/Workbench/icsprout55-pdk",
-  "parameters": {
-    "Design": "gcd",
-    "Top module": "gcd",
-    "Clock": "clk",
-    "Frequency max [MHz]": 100
+  "jsonrpc": "2.0",
+  "method": "workspace.create",
+  "params": {
+    "directory": "/path/to/gcd",
+    "pdk": "ics55",
+    "pdkRoot": "/path/to/icsprout55-pdk",
+    "parameters": {
+      "Design": "gcd",
+      "Top module": "gcd",
+      "Clock": "clk",
+      "Frequency max [MHz]": 100
+    },
+    "originVerilog": "/path/to/gcd.v",
+    "rtlList": ["/path/to/gcd.v"]
   },
-  "origin_def": "",
-  "origin_verilog": "/path/to/gcd.v",
-  "filelist": "",
-  "rtl_list": ["/path/to/gcd.v"]
+  "id": "create-1"
 }
 ```
 
-Run it with:
+If `filelist` is omitted and `rtlList` is present, ECC writes a workspace-local
+filelist before creating the workspace.
 
-```bash
-ecc workspace create --input-json request.json --json
+## Inspect A Workspace
+
+Use the returned `workspaceId` to inspect session state:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "workspace.home",
+  "params": {
+    "workspaceId": "workspace-1"
+  },
+  "id": "home-1"
+}
 ```
 
-You can also read from stdin:
+Tool-specific step information is available through `workspace.info`:
 
-```bash
-cat request.json | ecc workspace create --input-json - --json
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "workspace.info",
+  "params": {
+    "workspaceId": "workspace-1",
+    "step": "Synthesis",
+    "id": "layout"
+  },
+  "id": "info-1"
+}
 ```
 
-`--input-json` is mutually exclusive with the field flags such as `--directory`,
-`--pdk`, `--rtl`, `--param-json`, `--design`, `--top`, `--clock`, and `--freq`.
+Common info ids include `views`, `layout`, `metrics`, `subflow`, `analysis`,
+`maps`, `checklist`, `sta`, and `config`.
 
-Relative `origin_def`, `origin_verilog`, `filelist`, and `rtl_list` paths inside
-a JSON file are resolved relative to that JSON file. When reading JSON from
-stdin, relative paths are resolved relative to the current working directory.
+## Mutating Workspace Calls
 
-## Load And Run
+The runtime serializes mutating calls for the same workspace session. Supported
+first-slice mutation methods are:
 
-Load reconstructs the runtime workspace and initializes step workspaces if
-needed:
+- `workspace.refresh_config`
+- `workspace.sync_config`
+- `workspace.reset_flow`
+- `flow.run`
+- `flow.run_step`
+- `workspace.close`
 
-```bash
-ecc workspace load --directory gcd
-```
+`workspace.sync_config` requires `configPath` to be inside the workspace
+`config/` directory:
 
-Run the full flow:
-
-```bash
-ecc workspace run-flow --directory gcd
-```
-
-Rerun the full flow from a clean state:
-
-```bash
-ecc workspace run-flow --directory gcd --rerun
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "workspace.sync_config",
+  "params": {
+    "workspaceId": "workspace-1",
+    "configPath": "/path/to/gcd/config/route.json"
+  },
+  "id": "sync-1"
+}
 ```
 
 Run a single step:
 
-```bash
-ecc workspace run-step --directory gcd --step Synthesis
-```
-
-Rerun a single step:
-
-```bash
-ecc workspace run-step --directory gcd --step Synthesis --rerun
-```
-
-Step names are the flow step names stored in `home/flow.json`, such as
-`Synthesis`, `Floorplan`, `place`, `CTS`, or `route`, depending on the generated
-flow.
-
-## Inspect Workspace Data
-
-Get the `home/home.json` path:
-
-```bash
-ecc workspace get-home --directory gcd
-```
-
-Get tool-specific step information:
-
-```bash
-ecc workspace get-info --directory gcd --step Synthesis --id layout
-ecc workspace get-info --directory gcd --step Synthesis --id metrics
-ecc workspace get-info --directory gcd --step Synthesis --id subflow
-ecc workspace get-info --directory gcd --step Synthesis --id config
-```
-
-Common `--id` values include:
-
-- `views`
-- `layout`
-- `metrics`
-- `subflow`
-- `analysis`
-- `maps`
-- `checklist`
-- `sta`
-- `config`
-
-If a step has no data for an id, the command returns `warning` and exit code 0.
-
-## Common Errors
-
-### `missing required field: directory`
-
-`workspace create` does not accept a positional directory. Use:
-
-```bash
-ecc workspace create --directory gcd ...
-```
-
-not:
-
-```bash
-ecc workspace create gcd
-```
-
-### `PDK tech LEF is missing`
-
-Check that `--pdk` and `--pdk-root` are not swapped:
-
-```bash
-ecc workspace create --directory gcd --pdk ics55 --pdk-root /path/to/icsprout55-pdk
-```
-
-The PDK root must point at an unpacked ICS55 PDK tree containing the expected
-LEF and Liberty files.
-
-### `TOP_NAME (workspace.design.top_module) not set`
-
-Pass `--top`, or provide `Top module` through the parameters object:
-
 ```json
 {
-  "Design": "gcd",
-  "Top module": "gcd",
-  "Clock": "clk",
-  "Frequency max [MHz]": 100
+  "jsonrpc": "2.0",
+  "method": "flow.run_step",
+  "params": {
+    "workspaceId": "workspace-1",
+    "step": "Synthesis",
+    "rerun": false
+  },
+  "id": "step-1"
 }
 ```
 
-Then run with `--param-json params.json`, or include the same object as
-`parameters` in `--input-json`. A direct `--top` value overrides the JSON
-parameter.
+## Persistent DB Lifecycle
 
-### Command Does Not Use The Previous Workspace
+Persistent DB lifecycle calls are private runtime capabilities and are available
+only when the sidecar was started with `--persistent-db`.
 
-Every command needs `--directory`. For example:
+Ensure a session-scoped DB handle:
 
-```bash
-ecc workspace run-flow --directory gcd
-ecc workspace get-home --directory gcd
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "db.ensure",
+  "params": {
+    "workspaceId": "workspace-1",
+    "step": "Floorplan"
+  },
+  "id": "db-ensure-1"
+}
 ```
 
-The CLI does not persist a current workspace after `create` or `load`.
+The `step` field is optional. When omitted, ECC uses the existing flow rule for
+selecting the first unfinished step. A successful result reports whether the
+handle is active and whether an existing handle was reused:
+
+```json
+{
+  "workspaceId": "workspace-1",
+  "enabled": true,
+  "active": true,
+  "reused": false,
+  "step": "Floorplan"
+}
+```
+
+Release the active session DB handle:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "db.release",
+  "params": {
+    "workspaceId": "workspace-1"
+  },
+  "id": "db-release-1"
+}
+```
+
+`db.release` is idempotent and returns `released: false` when the session has no
+active DB handle. Workspace refresh, changed config sync, reset, rerun, close,
+replacement, and shutdown release stale handles. `flow.run` and `flow.run_step`
+reuse and capture DB state only when the session already has an active handle
+from `db.ensure`; otherwise their DB use remains transient.
+
+## Shutdown
+
+End the sidecar with `rpc.shutdown`:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "rpc.shutdown",
+  "id": "shutdown-1"
+}
+```
+
+The server closes workspace sessions and exits after the response is written.
+
+## Errors
+
+JSON-RPC validation errors use standard JSON-RPC error objects. Runtime errors
+use ECC-specific code strings in the JSON-RPC error `message` field, with
+human-readable details in `data.message` when available.
+
+Common runtime error messages:
+
+- `unsupported_version`: `rpc.hello` used an incompatible protocol version.
+- `workspace_session_not_found`: the supplied `workspaceId` is unknown or
+  closed.
+- `invalid_request`: params are missing required fields or include unknown
+  fields.
+- `command_failed`: workspace or flow execution failed.

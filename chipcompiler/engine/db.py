@@ -1,6 +1,6 @@
 #!/usr/bin/env python
-# -*- encoding: utf-8 -*-
-from chipcompiler.data import Workspace, WorkspaceStep, StepEnum
+from chipcompiler.data import Workspace, WorkspaceStep
+
 
 class EngineDB:
     """
@@ -18,6 +18,14 @@ class EngineDB:
     @property
     def engine(self):
         return self.ecc_module
+
+    def close(self) -> None:
+        if self.ecc_module is None:
+            return
+
+        ecc_module = self.ecc_module
+        self.ecc_module = None
+        ecc_module.close()
 
     def create_db_engine(self, step: WorkspaceStep) -> bool:
         """
@@ -52,6 +60,5 @@ class EngineDB:
         for example, 
         if step is "place", read instances data from step output def file and update to db egine.
         """
-        def_file = step.output["def"]
-        
+        _ = step.output["def"]
         self.ecc_module.read_def()

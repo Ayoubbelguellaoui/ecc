@@ -345,6 +345,47 @@ class TestConfigStepResolved:
             ]
             assert all(item["source"] == "workspace_config" for item in data["records"])
 
+    def test_config_cli_tokens_use_internal_flow_step_names(
+        self,
+        capsys,
+        create_cli_project,
+        create_flow_json,
+        create_step_dir,
+        create_ecc_workspace_config,
+    ):
+        cases = [
+            ("place", "placement", "pl_default_config.json"),
+            ("route", "routing", "rt_default_config.json"),
+        ]
+        for step_name, step_token, step_config in cases:
+            project_dir = create_cli_project(name=f"gcd_{step_token}")
+            run_dir = os.path.join(project_dir, "runs", "default")
+            create_flow_json(
+                run_dir,
+                [
+                    {
+                        "name": step_name,
+                        "tool": "ecc",
+                        "state": "Success",
+                        "runtime": "0:00:04",
+                    },
+                ],
+            )
+            create_step_dir(run_dir, step_name, "ecc", subdirs=["output"])
+            create_ecc_workspace_config(run_dir, step_config)
+
+            rc = cli_main.run(
+                ["config", step_token, "--resolved", "--json", "--project", project_dir]
+            )
+            assert rc == 0
+            data = json.loads(capsys.readouterr().out)
+            assert [item["path"] for item in data["records"]] == [
+                "runs/default/config/flow_config.json",
+                "runs/default/config/db_default_config.json",
+                f"runs/default/config/{step_config}",
+            ]
+            assert all(item["step"] == step_token for item in data["records"])
+
     def test_config_sta_uses_rcx_and_sta_workspace_configs(
         self,
         tmp_path,
@@ -360,14 +401,14 @@ class TestConfigStepResolved:
             run_dir,
             [
                 {
-                    "name": "STA",
+                    "name": "sta",
                     "tool": "ecc",
                     "state": "Success",
                     "runtime": "0:00:04",
                 },
             ],
         )
-        create_step_dir(run_dir, "STA", "ecc", subdirs=["output"])
+        create_step_dir(run_dir, "sta", "ecc", subdirs=["output"])
         create_workspace_config(
             run_dir,
             {
@@ -437,7 +478,8 @@ class TestEmptyStepConfigSentinel:
         out = capsys.readouterr().out
         assert "cts" in out
         assert "No configuration" in out
-        assert "artifacts:" in out
+        assert "artifacts:" not in out
+        assert "ecc artifacts" not in out
 
     def test_step_no_config_emits_sentinel_json(
         self, tmp_path, capsys, create_cli_project, create_flow_json, create_step_dir
@@ -452,6 +494,7 @@ class TestEmptyStepConfigSentinel:
         data = json.loads(capsys.readouterr().out)
         assert data["records"][0]["step"] == "cts"
         assert data["records"][0]["config_status"] == "none"
+        assert "artifacts" not in data["records"][0]
 
 
 class TestDirectoryOnlyStepConfig:
@@ -484,14 +527,13 @@ class TestDirectoryOnlyStepConfig:
             "runs/default/config/cts_default_config.json",
         ]
 
-    def test_dir_only_step_diagnose_uses_inferred_tool_for_config(
+    def test_dir_only_routing_uses_internal_step_directory_prefix(
         self,
-        tmp_path,
         capsys,
         create_cli_project,
         create_flow_json,
         create_step_dir,
-        create_cts_workspace_config,
+        create_ecc_workspace_config,
     ):
         project_dir = create_cli_project()
         run_dir = os.path.join(project_dir, "runs", "default")
@@ -501,48 +543,17 @@ class TestDirectoryOnlyStepConfig:
                 {"name": "Synthesis", "tool": "yosys", "state": "Success", "runtime": "0:00:05"},
             ],
         )
-        create_step_dir(
-            run_dir,
-            "CTS",
-            "ecc",
-            subdirs=["log", "output", "analysis"],
-            files={
-                "log/cts.log": "ok\n",
-                "output/design.def": "def",
-                "analysis/CTS_metrics.json": "{}",
-            },
-        )
-        create_cts_workspace_config(run_dir)
+        create_step_dir(run_dir, "route", "ecc", subdirs=["output"])
+        create_ecc_workspace_config(run_dir, "rt_default_config.json")
 
-        rc = cli_main.run(["diagnose", "cts", "--project", project_dir])
+        rc = cli_main.run(["config", "routing", "--resolved", "--json", "--project", project_dir])
         assert rc == 0
-        out = capsys.readouterr().out
-        assert "config_unavailable" not in out
-        assert "clean" in out
-
-
-class TestConfigRoleDisclosure:
-    def test_config_artifact_has_disclosure(
-        self,
-        tmp_path,
-        capsys,
-        create_cli_project,
-        create_flow_json,
-        create_step_dir,
-        has_disclosure,
-    ):
-        project_dir = create_cli_project()
-        run_dir = os.path.join(project_dir, "runs", "default")
-        create_flow_json(run_dir)
-        create_step_dir(
-            run_dir, "CTS", "ecc", subdirs=["config"], files={"config/cts_config.json": "{}"}
-        )
-
-        rc = cli_main.run(["artifacts", "cts", "--project", project_dir])
-        assert rc == 0
-        out = capsys.readouterr().out
-        assert has_disclosure(out)
-
+        data = json.loads(capsys.readouterr().out)
+        assert [item["path"] for item in data["records"]] == [
+            "runs/default/config/flow_config.json",
+            "runs/default/config/db_default_config.json",
+            "runs/default/config/rt_default_config.json",
+        ]
 
 class TestAbsoluteRunIdConfig:
     def test_absolute_run_id_preserves_run_dir_value(
