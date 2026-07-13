@@ -13,7 +13,9 @@ from chipcompiler.runtime.requests import (
     FlowRunRequest,
     FlowRunStepRequest,
     WorkspaceCreateRequest,
+    WorkspaceExportSignoffRequest,
     WorkspaceIdRequest,
+    WorkspaceInspectSignoffRequest,
     WorkspaceInfoRequest,
     WorkspaceOpenRequest,
     WorkspaceSyncConfigRequest,
@@ -55,9 +57,7 @@ class WorkspaceRuntimeApi:
         if not input_filelist:
             rtl_paths = _normalize_rtl_list(request.rtl_list or [])
             if rtl_paths:
-                temp_filelist_dir = tempfile.TemporaryDirectory(
-                    prefix="ecc-workspace-filelist-"
-                )
+                temp_filelist_dir = tempfile.TemporaryDirectory(prefix="ecc-workspace-filelist-")
                 input_filelist = _write_filelist(temp_filelist_dir.name, rtl_paths)
 
         import chipcompiler.data as data_api
@@ -73,6 +73,8 @@ class WorkspaceRuntimeApi:
                 input_filelist=input_filelist,
                 pdk_root=request.pdk_root,
                 pdk_json=pdk_json,
+                sdc=request.sdc,
+                flow_config=request.flow_config,
             )
         finally:
             if pdk_json_temp_path is not None:
@@ -167,6 +169,28 @@ class WorkspaceRuntimeApi:
             return {"directory": str(session.directory)}
 
         return self._with_session_mutation_lock(request.workspace_id, reset)
+
+    def export_signoff(self, request: WorkspaceExportSignoffRequest) -> dict:
+        def export(session: WorkspaceSession) -> dict:
+            from chipcompiler.runtime.signoff_export import (
+                export_signoff_package_archive,
+            )
+
+            output_path = export_signoff_package_archive(
+                session.workspace,
+                request.output_path,
+            )
+            return {"outputPath": output_path}
+
+        return self._with_session_mutation_lock(request.workspace_id, export)
+
+    def inspect_signoff(self, request: WorkspaceInspectSignoffRequest) -> dict:
+        def inspect(session: WorkspaceSession) -> dict:
+            from chipcompiler.runtime.signoff_export import inspect_signoff_package
+
+            return inspect_signoff_package(session.workspace)
+
+        return self._with_session_mutation_lock(request.workspace_id, inspect)
 
     def close_workspace(self, request: WorkspaceIdRequest) -> dict:
         def close(session: WorkspaceSession) -> dict:

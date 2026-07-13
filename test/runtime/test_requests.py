@@ -11,7 +11,9 @@ from chipcompiler.runtime.requests import (
     RequestValidationError,
     WorkspaceCloseRequest,
     WorkspaceCreateRequest,
+    WorkspaceExportSignoffRequest,
     WorkspaceIdRequest,
+    WorkspaceInspectSignoffRequest,
     WorkspaceInfoRequest,
     WorkspaceOpenRequest,
     WorkspaceSyncConfigRequest,
@@ -27,6 +29,11 @@ def _parse_runtime_request(method: str, params: object, *, persistent_db_enabled
 
 def test_workspace_create_maps_camel_case_fields_and_preserves_pdk_json():
     pdk_json = {"name": "ics55", "lef": ["tech.lef"]}
+    flow_config = {
+        "start_step": "Synthesis",
+        "end_step": "Harden",
+        "steps": ["Synthesis", "RCX", "sta", "Harden"],
+    }
 
     request = _parse_runtime_request(
         "workspace.create",
@@ -39,6 +46,8 @@ def test_workspace_create_maps_camel_case_fields_and_preserves_pdk_json():
             "originVerilog": "/in.v",
             "paramJson": {"Design": "gcd"},
             "rtlList": ["a.v"],
+            "sdc": "/constraints/top.sdc",
+            "flowConfig": flow_config,
         },
     )
 
@@ -51,6 +60,8 @@ def test_workspace_create_maps_camel_case_fields_and_preserves_pdk_json():
     assert request.origin_verilog == "/in.v"
     assert request.parameters == {"Design": "gcd"}
     assert request.rtl_list == ["a.v"]
+    assert request.sdc == "/constraints/top.sdc"
+    assert request.flow_config == flow_config
 
 
 @pytest.mark.parametrize(
@@ -61,6 +72,16 @@ def test_workspace_create_maps_camel_case_fields_and_preserves_pdk_json():
         ("workspace.home", {"workspaceId": "ws-1"}, WorkspaceIdRequest),
         ("workspace.refresh_config", {"workspaceId": "ws-1"}, WorkspaceIdRequest),
         ("workspace.reset_flow", {"workspaceId": "ws-1"}, WorkspaceIdRequest),
+        (
+            "workspace.export_signoff",
+            {"workspaceId": "ws-1", "outputPath": "/exports/custom.tar.gz"},
+            WorkspaceExportSignoffRequest,
+        ),
+        (
+            "workspace.inspect_signoff",
+            {"workspaceId": "ws-1"},
+            WorkspaceInspectSignoffRequest,
+        ),
         (
             "workspace.sync_config",
             {"workspaceId": "ws-1", "configPath": "/work/ws/config/route.json"},
@@ -166,6 +187,19 @@ def test_workspace_info_accepts_info_id_alias():
 
     assert isinstance(request, WorkspaceInfoRequest)
     assert request.info_id == "timing"
+
+
+def test_workspace_export_signoff_preserves_exact_output_path():
+    request = _parse_runtime_request(
+        "workspace.export_signoff",
+        {
+            "workspaceId": "ws-1",
+            "outputPath": "/exports/custom.tar.gz ",
+        },
+    )
+
+    assert isinstance(request, WorkspaceExportSignoffRequest)
+    assert request.output_path == "/exports/custom.tar.gz "
 
 
 @pytest.mark.parametrize(

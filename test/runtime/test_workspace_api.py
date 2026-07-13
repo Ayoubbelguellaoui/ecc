@@ -247,6 +247,7 @@ def test_create_workspace_returns_plain_runtime_result_and_session(monkeypatch, 
             pdk_json={"name": "ics55"},
             parameters={"Design": "gcd"},
             rtl_list=["a.v"],
+            sdc="/constraints/top.sdc",
         )
     )
 
@@ -254,8 +255,24 @@ def test_create_workspace_returns_plain_runtime_result_and_session(monkeypatch, 
     assert result["directory"] == str(ws.resolve())
     assert result["workspaceId"].startswith("workspace-")
     assert isinstance(capture["create_kwargs"]["pdk_json"], str)
+    assert capture["create_kwargs"]["sdc"] == "/constraints/top.sdc"
     assert DummyFlow.instances[0].created
     assert api.sessions.get_session(result["workspaceId"]).directory == ws.resolve()
+
+
+def test_create_workspace_forwards_dynamic_flow_config(monkeypatch, tmp_path):
+    capture, ws = _install_runtime_mocks(monkeypatch, tmp_path)
+    flow_config = {
+        "start_step": "Synthesis",
+        "end_step": "Harden",
+        "steps": ["Synthesis", "RCX", "sta", "Harden"],
+    }
+
+    WorkspaceRuntimeApi().create_workspace(
+        WorkspaceCreateRequest(directory=str(ws), flow_config=flow_config)
+    )
+
+    assert capture["create_kwargs"]["flow_config"] == flow_config
 
 
 def test_create_workspace_writes_rtl_list_filelist_outside_workspace(

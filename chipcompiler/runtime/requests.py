@@ -15,6 +15,8 @@ class WorkspaceCreateRequest:
     origin_verilog: str = ""
     filelist: str = ""
     rtl_list: list[str] | None = None
+    sdc: str = ""
+    flow_config: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -36,6 +38,17 @@ class WorkspaceCloseRequest:
 class WorkspaceSyncConfigRequest:
     workspace_id: str
     config_path: str
+
+
+@dataclass(frozen=True)
+class WorkspaceExportSignoffRequest:
+    workspace_id: str
+    output_path: str
+
+
+@dataclass(frozen=True)
+class WorkspaceInspectSignoffRequest:
+    workspace_id: str
 
 
 @dataclass(frozen=True)
@@ -76,6 +89,7 @@ class RequestValidationError(ValueError):
 
 
 FIELD_ALIASES = {
+    "flowConfig": "flow_config",
     "pdkRoot": "pdk_root",
     "pdkJson": "pdk_json",
     "originDef": "origin_def",
@@ -84,6 +98,7 @@ FIELD_ALIASES = {
     "rtlList": "rtl_list",
     "workspaceId": "workspace_id",
     "configPath": "config_path",
+    "outputPath": "output_path",
     "infoId": "info_id",
     "id": "info_id",
 }

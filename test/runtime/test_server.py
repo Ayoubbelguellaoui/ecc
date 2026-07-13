@@ -3,7 +3,13 @@ import json
 import pytest
 
 from chipcompiler.runtime.methods import RUNTIME_METHODS, runtime_methods
-from chipcompiler.runtime.requests import DbEnsureRequest, DbReleaseRequest, WorkspaceOpenRequest
+from chipcompiler.runtime.requests import (
+    DbEnsureRequest,
+    DbReleaseRequest,
+    WorkspaceExportSignoffRequest,
+    WorkspaceInspectSignoffRequest,
+    WorkspaceOpenRequest,
+)
 from chipcompiler.runtime.server import RuntimeServer
 from chipcompiler.runtime.workspace_api import RuntimeApiError
 
@@ -36,6 +42,12 @@ class CompleteFakeApi:
 
     def reset_flow(self, _request):
         raise AssertionError("unexpected reset_flow call")
+
+    def export_signoff(self, _request):
+        raise AssertionError("unexpected export_signoff call")
+
+    def inspect_signoff(self, _request):
+        raise AssertionError("unexpected inspect_signoff call")
 
     def flow_run(self, _request):
         raise AssertionError("unexpected flow_run call")
@@ -158,6 +170,53 @@ def test_workspace_method_dispatches_typed_request_to_runtime_api():
     }
 
 
+def test_workspace_export_signoff_dispatches_exact_output_path():
+    class FakeApi(CompleteFakeApi):
+        def export_signoff(self, request):
+            assert isinstance(request, WorkspaceExportSignoffRequest)
+            return {"outputPath": request.output_path}
+
+    server = RuntimeServer(api=FakeApi())
+
+    response = _dispatch(
+        server,
+        (
+            '{"jsonrpc":"2.0","method":"workspace.export_signoff",'
+            '"params":{"workspaceId":"workspace-1",'
+            '"outputPath":"/exports/custom.tar.gz "},"id":5}'
+        ),
+    )
+
+    assert response == {
+        "jsonrpc": "2.0",
+        "result": {"outputPath": "/exports/custom.tar.gz "},
+        "id": 5,
+    }
+
+
+def test_workspace_inspect_signoff_dispatches_typed_request():
+    class FakeApi(CompleteFakeApi):
+        def inspect_signoff(self, request):
+            assert isinstance(request, WorkspaceInspectSignoffRequest)
+            return {"status": "ready", "groups": [], "risks": []}
+
+    server = RuntimeServer(api=FakeApi())
+
+    response = _dispatch(
+        server,
+        (
+            '{"jsonrpc":"2.0","method":"workspace.inspect_signoff",'
+            '"params":{"workspaceId":"workspace-1"},"id":6}'
+        ),
+    )
+
+    assert response == {
+        "jsonrpc": "2.0",
+        "result": {"status": "ready", "groups": [], "risks": []},
+        "id": 6,
+    }
+
+
 def test_persistent_db_methods_dispatch_typed_requests_to_runtime_api():
     seen = []
 
@@ -189,10 +248,7 @@ def test_persistent_db_methods_dispatch_typed_requests_to_runtime_api():
     )
     release_response = _dispatch(
         server,
-        (
-            '{"jsonrpc":"2.0","method":"db.release",'
-            '"params":{"workspaceId":"workspace-1"},"id":9}'
-        ),
+        ('{"jsonrpc":"2.0","method":"db.release","params":{"workspaceId":"workspace-1"},"id":9}'),
     )
 
     assert ensure_response["result"] == {
@@ -214,10 +270,7 @@ def test_persistent_db_methods_are_not_registered_by_default():
 
     response = _dispatch(
         server,
-        (
-            '{"jsonrpc":"2.0","method":"db.ensure",'
-            '"params":{"workspaceId":"workspace-1"},"id":10}'
-        ),
+        ('{"jsonrpc":"2.0","method":"db.ensure","params":{"workspaceId":"workspace-1"},"id":10}'),
     )
 
     assert response["id"] == 10
