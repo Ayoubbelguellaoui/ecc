@@ -1,8 +1,9 @@
 #!/usr/bin/env python
 import os
 import subprocess
+from pathlib import Path
 
-from chipcompiler.data import StateEnum, Workspace, WorkspaceStep
+from chipcompiler.data import StateEnum, Workspace, YosysStep
 from chipcompiler.tools.yosys.checklist import YosysChecklist
 from chipcompiler.tools.yosys.metrics import build_step_metrics
 from chipcompiler.tools.yosys.subflow import YosysSubFlow
@@ -40,7 +41,7 @@ def _remove_parameter_overrides(text: str) -> str:
     return "".join(out)
 
 
-def _write_fixed_netlist(src_path: str, dst_path: str) -> bool:
+def _write_fixed_netlist(src_path: str | Path, dst_path: str | Path) -> bool:
     """Write an extra netlist with parameter override blocks removed."""
     if not src_path or not dst_path or not os.path.exists(src_path):
         return False
@@ -52,9 +53,7 @@ def _write_fixed_netlist(src_path: str, dst_path: str) -> bool:
     return True
 
 
-def _run_ecc_synthesis_sta(workspace: Workspace,
-                           step: WorkspaceStep,
-                           ecc_module=None) -> bool:
+def _run_ecc_synthesis_sta(workspace: Workspace, step: YosysStep, ecc_module=None) -> bool:
     """Run optional ECC STA without making ECC a Yosys import dependency."""
     try:
         from chipcompiler.tools.ecc.runner import run_sta_without_spef
@@ -71,9 +70,7 @@ def _run_ecc_synthesis_sta(workspace: Workspace,
         return False
 
 
-def run_step(workspace: Workspace,
-             step: WorkspaceStep,
-             ecc_module=None) -> bool:
+def run_step(workspace: Workspace, step: YosysStep, ecc_module=None) -> bool:
     """
     Run the synthesis step using yosys.
 
@@ -89,20 +86,21 @@ def run_step(workspace: Workspace,
         True if synthesis succeeded, False otherwise
     """
     sub_flow = YosysSubFlow(workspace=workspace, workspace_step=step)
+    log_path = step.log.file or ""
 
     yosys_cmd, yosys_env = get_yosys_runtime()
     if not yosys_cmd:
         sub_flow.update_step(step_name="run yosys", state=StateEnum.Invalid)
         error_msg = "Error: yosys is not available (bundled runtime or PATH)."
         try:
-            with open(step.log["file"], "w") as log_file:
+            with open(log_path, "w") as log_file:
                 log_file.write(error_msg + "\n")
         except Exception:
             pass
         print(error_msg)
         return False
 
-    input_verilog = step.input.get("verilog", "")
+    input_verilog = step.input.verilog or ""
     input_filelist = workspace.design.input_filelist if workspace.design.input_filelist else ""
 
     # Validate that at least one of input_verilog or filelist is valid
@@ -115,13 +113,13 @@ def run_step(workspace: Workspace,
         return False
 
     try:
-        cwd_dir = str(step.script.get("dir", step.directory))
+        cwd_dir = str(step.script.dir or step.directory)
 
         cmd = yosys_cmd + ["yosys_synthesis.tcl"]
 
-        with open(step.log["file"], "w") as log_file:
-            step_data = getattr(step, "data", {}) or {}
-            if step_data.get("requires_slang", True) and not check_slang_plugin(
+        with open(log_path, "w") as log_file:
+            step_data = getattr(step, "data", None)
+            if getattr(step_data, "requires_slang", True) and not check_slang_plugin(
                 yosys_cmd=yosys_cmd,
                 cwd_dir=cwd_dir,
                 yosys_env=yosys_env,
@@ -138,32 +136,32 @@ def run_step(workspace: Workspace,
                 stderr=subprocess.STDOUT,
             )
 
-        if os.path.exists(step.output["verilog"]):
+        if os.path.exists(step.output.verilog or ""):
             sub_flow.update_step(step_name="run yosys", state=StateEnum.Success)
 
-            fixed_netlist = step.output.get("fixed_verilog", "")
+            fixed_netlist = step.output.fixed_verilog or ""
             if fixed_netlist:
-                _write_fixed_netlist(step.output["verilog"], fixed_netlist)
+                _write_fixed_netlist(step.output.verilog or "", fixed_netlist)
 
             _run_ecc_synthesis_sta(
                 workspace=workspace,
                 step=step,
                 ecc_module=ecc_module,
             )
-            
+
             build_step_metrics(workspace=workspace, step=step)
-            
+
             sub_flow.update_step(step_name="analysis", state=StateEnum.Success)
-            
+
             checklist = YosysChecklist(workspace=workspace, workspace_step=step)
             checklist.check()
-            
+
             return True
         else:
             sub_flow.update_step(step_name="run yosys", state=StateEnum.Invalid)
-            
+
             print(
-                f"Error: Output netlist not generated at {step.output['verilog']}. "
+                f"Error: Output netlist not generated at {step.output.verilog}. "
                 f"yosys exit code: {result.returncode}"
             )
             return False

@@ -6,7 +6,9 @@ import chipcompiler.data as data_api
 import chipcompiler.data.workspace as workspace_data
 from chipcompiler.data import (
     OriginDesign,
+    OutputPaths,
     StepEnum,
+    StepInput,
     WorkspaceStep,
     create_workspace,
     load_workspace,
@@ -67,8 +69,8 @@ def test_rcx_step_config_uses_top_module_for_spef_paths(tmp_path):
     )
     step = WorkspaceStep(
         name=StepEnum.RCX.value,
-        input={"def": None, "verilog": None},
-        output={"dir": tmp_path / "RCX_ecc" / "output"},
+        input=StepInput(def_=None, verilog=None),
+        output=OutputPaths(dir=tmp_path / "RCX_ecc" / "output"),
     )
 
     update_step_config(workspace, step)
@@ -530,7 +532,7 @@ def test_workspace_config_metadata_is_private_and_step_enum_keyed():
 
 
 def test_workspace_data_does_not_import_cli_step_normalization():
-    source = Path("chipcompiler/data/workspace.py").read_text()
+    source = Path("chipcompiler/data/workspace/__init__.py").read_text()
 
     assert "normalize_step_name" not in source
     assert "chipcompiler.cli" not in source
@@ -775,7 +777,9 @@ def test_sync_workspace_config_to_parameters_preserves_routability_flag_string_c
         dreamplace["routability_opt_flag"] = raw_value
         json_write(workspace.config["dreamplace"], dreamplace)
 
-        assert sync_workspace_config_to_parameters(workspace, workspace.config["dreamplace"]) is True
+        assert (
+            sync_workspace_config_to_parameters(workspace, workspace.config["dreamplace"]) is True
+        )
 
         params = json_read(parameter_path)
         assert params["Routability opt flag"] == expected

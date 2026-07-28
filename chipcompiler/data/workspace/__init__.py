@@ -1,106 +1,119 @@
 #!/usr/bin/env python
-# -*- encoding: utf-8 -*-
 
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields, is_dataclass
 from pathlib import Path
 from typing import Any, Final
-from .parameter import (
-    Parameters,
-    get_parameters, 
-    save_parameter, 
-    load_parameter,
-    update_parameters
-)
 
-from .home import HomeData
-
-from .pdk import get_pdk, PDK
-from .step import StateEnum, StepEnum
 from chipcompiler.utility import Logger, create_logger, dict_to_str
-from chipcompiler.utility.filelist import parse_filelist, resolve_path, parse_incdir_directives
+from chipcompiler.utility.filelist import parse_filelist, parse_incdir_directives, resolve_path
 from chipcompiler.utility.path import path_is_within, path_text
+
+from ..home import HomeData
+from ..parameter import (
+    Parameters,
+    get_parameters,
+    load_parameter,
+    save_parameter,
+    update_parameters,
+)
+from ..pdk import PDK, get_pdk
+from ..step import StateEnum, StepEnum
+from .layout import EccData, WorkspaceStepBase
+
+# The shared step type used as the annotation/constructor across the codebase.
+WorkspaceStep = WorkspaceStepBase
+
 
 @dataclass
 class OriginDesign:
     """
     Dataclass for original design information
     """
-    name : str = "" # design name
-    top_module : str = "" # top module name
-    origin_def : Path | None = None # original def file path
-    origin_verilog : Path | None = None # original verilog file path
-    input_filelist : Path | None = None # input filelist for synthesis
-    
+
+    name: str = ""  # design name
+    top_module: str = ""  # top module name
+    origin_def: Path | None = None  # original def file path
+    origin_verilog: Path | None = None  # original verilog file path
+    input_filelist: Path | None = None  # input filelist for synthesis
+
+
 @dataclass
 class Flow:
     """
     Dataclass for design flow
     """
-    path : Path | None = None # flow file path
-    data : dict = field(default_factory=dict) # flow steps
-    
+
+    path: Path | None = None  # flow file path
+    data: dict = field(default_factory=dict)  # flow steps
+
+
 @dataclass
 class Workspace:
     """
     Dataclass for workspace information
     """
-    directory : Path | None = None # workspace directory
-    design : OriginDesign = field(default_factory=OriginDesign) # original design info
-    pdk : PDK = field(default_factory=PDK) # pdk information
-    parameters : Parameters = field(default_factory=Parameters) # design parameters
-    flow : Flow = field(default_factory=Flow) # design flow for this workspace
-    home : HomeData = field(default_factory=HomeData) # home data for this workspace
-    config : dict[str, Path] = field(default_factory=dict) # workspace-level config paths
-    
+
+    directory: Path | None = None  # workspace directory
+    design: OriginDesign = field(default_factory=OriginDesign)  # original design info
+    pdk: PDK = field(default_factory=PDK)  # pdk information
+    parameters: Parameters = field(default_factory=Parameters)  # design parameters
+    flow: Flow = field(default_factory=Flow)  # design flow for this workspace
+    home: HomeData = field(default_factory=HomeData)  # home data for this workspace
+    config: dict[str, Path] = field(default_factory=dict)  # workspace-level config paths
+
     # logger
-    logger : Logger = field(default_factory=Logger) # logger for this workspace
-    
-@dataclass
-class WorkspaceStep:
+    logger: Logger = field(default_factory=Logger)  # logger for this workspace
+
+
+def step_group_to_dict(group: Any) -> dict:
+    """Project a typed path group back to its legacy-key dict for logging.
+
+    Reproduces the pre-migration per-builder key set: a scalar/path field is
+    emitted only when populated (so a variant's inherited-but-unset fields — e.g.
+    ``db`` on a synthesis output, or ``sizer_env`` on a non-sizer script — do not
+    appear), while list/mapping payloads (``spef``/``steps``/``checklist``) are
+    always emitted as the builders always initialized them. Renames ``def_`` to
+    ``"def"``, flattens ``EccData.steps`` into its dynamic per-step keys, and
+    recurses into nested groups (e.g. ``report.sta``).
     """
-    Dataclass for workspace step path information, describe all the info for this task step.
-    """
-    # step basic info
-    name : str = "" # step name
-    directory : Path | None = None # step working directory
+    result: dict = {}
+    for f in fields(group):
+        if f.name == "steps" and isinstance(group, EccData):
+            result.update(group.steps)
+            continue
+        if f.name == "requires_slang":
+            # typed-model gate flag, not a legacy path key; never projected.
+            continue
+        value = getattr(group, f.name)
+        if is_dataclass(value) and not isinstance(value, type):
+            value = step_group_to_dict(value)
+        elif value is None:
+            # A field this builder never populated (inherited from the base or a
+            # sibling variant); it was not in the legacy dict, so skip it.
+            continue
+        key = "def" if f.name == "def_" else f.name
+        result[key] = value
+    return result
 
-    # eda tool info
-    tool : str = "" # eda tool name
-    version : str = "" # eda tool version
 
-    # Paths for this step
-    input : dict = field(default_factory=dict) # input path about this step
-    output : dict = field(default_factory=dict) # output path about this step
-    data : dict = field(default_factory=dict) # data path about this step
-    feature : dict = field(default_factory=dict) # features path about this step
-    report : dict = field(default_factory=dict) # report path about this step
-    log : dict = field(default_factory=dict) # log path about this step
-    script : dict = field(default_factory=dict) # script path about this step
-    analysis : dict = field(default_factory=dict) # analysis path about this step
-    subflow : dict = field(default_factory=dict) # sub flow for this step
-    checklist : dict = field(default_factory=dict) # checklist for this step
-
-    # step result info
-    result : dict = field(default_factory=dict) # result info about this step
-    
-def log_workspace_step(step : WorkspaceStep, logger : Logger):
+def log_workspace_step(step: WorkspaceStep, logger: Logger):
     logger.log_section(f"step {step.name} info")
     logger.info(f"step name         : {step.name}")
     logger.info(f"step eda          : {step.tool}")
     logger.info(f"step eda version  : {step.version}")
     logger.info(f"step subworkspace : {step.directory}")
-    
-    logger.info("\ninput - \n%s", dict_to_str(step.input))
-    logger.info("\noutput - \n%s", dict_to_str(step.output))
-    logger.info("\ndata - \n%s", dict_to_str(step.data))
-    logger.info("\nfeature - \n%s", dict_to_str(step.feature))
-    logger.info("\nreport - \n%s", dict_to_str(step.report))
-    logger.info("\nlog - \n%s", dict_to_str(step.log))
-    logger.info("\nscript - \n%s", dict_to_str(step.script))
-    logger.info("\nanalysis - \n%s", dict_to_str(step.analysis))
-    logger.info("\nsubflow - \n%s", dict_to_str(step.subflow))
-    logger.info("\nchecklist - \n%s", dict_to_str(step.checklist))
+
+    logger.info("\ninput - \n%s", dict_to_str(step_group_to_dict(step.input)))
+    logger.info("\noutput - \n%s", dict_to_str(step_group_to_dict(step.output)))
+    logger.info("\ndata - \n%s", dict_to_str(step_group_to_dict(step.data)))
+    logger.info("\nfeature - \n%s", dict_to_str(step_group_to_dict(step.feature)))
+    logger.info("\nreport - \n%s", dict_to_str(step_group_to_dict(step.report)))
+    logger.info("\nlog - \n%s", dict_to_str(step_group_to_dict(step.log)))
+    logger.info("\nscript - \n%s", dict_to_str(step_group_to_dict(step.script)))
+    logger.info("\nanalysis - \n%s", dict_to_str(step_group_to_dict(step.analysis)))
+    logger.info("\nsubflow - \n%s", dict_to_str(step_group_to_dict(step.subflow)))
+    logger.info("\nchecklist - \n%s", dict_to_str(step_group_to_dict(step.checklist)))
     logger.log_separator()
 
 
@@ -124,9 +137,7 @@ _WORKSPACE_CONFIG_FILENAMES: Final[dict[str, str]] = {
     "dreamplace": "dreamplace.json",
 }
 
-_STEP_BY_VALUE: Final[dict[str, StepEnum]] = {
-    step.value: step for step in StepEnum
-}
+_STEP_BY_VALUE: Final[dict[str, StepEnum]] = {step.value: step for step in StepEnum}
 
 _STEP_CONFIG_KEYS: Final[dict[tuple[StepEnum, str], tuple[str, ...]]] = {
     (StepEnum.FLOORPLAN, "ecc"): ("flow", "db", StepEnum.FLOORPLAN.value),
@@ -456,25 +467,20 @@ def _coerce_legacy_dreamplace_routability_flag(workspace: Workspace, dreamplace:
 def _ensure_writable(path: str):
     import os
     import stat
+    from contextlib import suppress
 
-    try:
+    with suppress(OSError):
         os.chmod(path, os.stat(path).st_mode | stat.S_IWUSR | stat.S_IXUSR)
-    except OSError:
-        pass
 
     for root, dirs, files in os.walk(path):
         for name in dirs:
             target = os.path.join(root, name)
-            try:
+            with suppress(OSError):
                 os.chmod(target, os.stat(target).st_mode | stat.S_IWUSR | stat.S_IXUSR)
-            except OSError:
-                pass
         for name in files:
             target = os.path.join(root, name)
-            try:
+            with suppress(OSError):
                 os.chmod(target, os.stat(target).st_mode | stat.S_IWUSR)
-            except OSError:
-                pass
 
 
 def _copy_missing_files(src_dir: str, dst_dir: str):
@@ -509,7 +515,7 @@ def init_workspace_config(workspace: Workspace) -> None:
         workspace.config = build_workspace_config_paths(workspace)
 
     config_dir = workspace.config["dir"]
-    root_dir = Path(__file__).resolve().parent.parent
+    root_dir = Path(__file__).resolve().parent.parent.parent
     ecc_config_dir = root_dir / "tools" / "ecc" / "configs"
     dreamplace_config = root_dir / "tools" / "ecc_dreamplace" / "configs" / "dreamplace.json"
 
@@ -706,14 +712,17 @@ def prepare_workspace_for_rerun(workspace: Workspace, engine_flow) -> None:
         if not step_directory:
             continue
         resolved_step_directory = Path(step_directory).resolve()
-        if (
-            resolved_step_directory == workspace_root
-            or not path_is_within(resolved_step_directory, workspace_root)
+        if resolved_step_directory == workspace_root or not path_is_within(
+            resolved_step_directory, workspace_root
         ):
-            raise ValueError(f"refusing to delete step directory outside workspace: {step_directory}")
+            raise ValueError(
+                f"refusing to delete step directory outside workspace: {step_directory}"
+            )
         step_directories.append(resolved_step_directory)
 
-    for step_directory in sorted(set(step_directories), key=lambda path: len(str(path)), reverse=True):
+    for step_directory in sorted(
+        set(step_directories), key=lambda path: len(str(path)), reverse=True
+    ):
         if not step_directory.exists():
             continue
         if step_directory.is_symlink() or step_directory.is_file():
@@ -749,21 +758,21 @@ def update_step_config(workspace: Workspace, step: WorkspaceStep) -> None:
         workspace.config = build_workspace_config_paths(workspace)
 
     db = json_read(workspace.config["db"])
-    db["INPUT"]["def_path"] = path_text(step.input.get("def"))
-    db["INPUT"]["verilog_path"] = path_text(step.input.get("verilog"))
-    db["OUTPUT"]["output_dir_path"] = path_text(step.output.get("dir"))
+    db["INPUT"]["def_path"] = path_text(step.input.def_)
+    db["INPUT"]["verilog_path"] = path_text(step.input.verilog)
+    db["OUTPUT"]["output_dir_path"] = path_text(step.output.dir)
     json_write(workspace.config["db"], db)
 
-    if step.name == StepEnum.ROUTING.value:
+    if step.name == StepEnum.ROUTING.value and isinstance(step.data, EccData):
         router = json_read(workspace.config[f"{StepEnum.ROUTING.value}"])
         router["RT"]["-temp_directory_path"] = path_text(
-            step.data.get(f"{StepEnum.ROUTING.value}")
+            step.data.steps.get(StepEnum.ROUTING.value)
         )
         json_write(workspace.config[f"{StepEnum.ROUTING.value}"], router)
 
     if step.name == StepEnum.RCX.value:
         rcx = json_read(workspace.config[f"{StepEnum.RCX.value}"])
-        rcx_output_dir = path_text(step.output.get("dir"))
+        rcx_output_dir = path_text(step.output.dir)
         spef_design_name = workspace.design.top_module or workspace.design.name
         rcx["output"] = rcx_output_dir
         for corner in rcx.get("corners", []):
@@ -781,7 +790,7 @@ def update_step_config(workspace: Workspace, step: WorkspaceStep) -> None:
                     for temperature in temperatures
                 ]
         json_write(workspace.config[f"{StepEnum.RCX.value}"], rcx)
-    
+
 
 def copy_filelist_with_sources(input_filelist: str, workspace_dir: str, logger=None) -> str:
     """
@@ -818,7 +827,7 @@ def copy_filelist_with_sources(input_filelist: str, workspace_dir: str, logger=N
 
     filelist_dir = os.path.dirname(os.path.abspath(input_filelist))
     copied_files = set()
-    stats = {'copied': 0, 'missing': 0, 'incdir_copied': 0, 'incdir_skipped': 0}
+    stats = {"copied": 0, "missing": 0, "incdir_copied": 0, "incdir_skipped": 0}
 
     # Copy files listed in filelist
     try:
@@ -834,7 +843,7 @@ def copy_filelist_with_sources(input_filelist: str, workspace_dir: str, logger=N
         if not os.path.exists(abs_src):
             if logger:
                 logger.warning(f"File not found (skipping): {abs_src}")
-            stats['missing'] += 1
+            stats["missing"] += 1
             continue
 
         rel_path = os.path.basename(src_path) if os.path.isabs(src_path) else src_path
@@ -846,7 +855,7 @@ def copy_filelist_with_sources(input_filelist: str, workspace_dir: str, logger=N
 
         if _copy_file_safely(abs_src, os.path.join(origin_dir, rel_path), logger, src_path):
             copied_files.add(rel_path)
-            stats['copied'] += 1
+            stats["copied"] += 1
 
     # Copy +incdir directories
     try:
@@ -869,13 +878,13 @@ def copy_filelist_with_sources(input_filelist: str, workspace_dir: str, logger=N
                 logger.warning(f"Include path is not a directory: {abs_incdir}")
             continue
 
-        for root, dirs, files in os.walk(abs_incdir):
+        for root, _dirs, files in os.walk(abs_incdir):
             for filename in files:
                 src_file = os.path.join(root, filename)
                 rel_from_filelist = os.path.relpath(src_file, filelist_dir)
 
                 if rel_from_filelist in copied_files:
-                    stats['incdir_skipped'] += 1
+                    stats["incdir_skipped"] += 1
                     if logger:
                         logger.debug(f"Skipping duplicate from +incdir: {rel_from_filelist}")
                     continue
@@ -883,7 +892,7 @@ def copy_filelist_with_sources(input_filelist: str, workspace_dir: str, logger=N
                 dst_file = os.path.join(origin_dir, rel_from_filelist)
                 if _copy_file_safely(src_file, dst_file, logger, f"+incdir/{src_file}"):
                     copied_files.add(rel_from_filelist)
-                    stats['incdir_copied'] += 1
+                    stats["incdir_copied"] += 1
 
     # Copy filelist file itself
     new_filelist = os.path.join(origin_dir, os.path.basename(input_filelist))
@@ -937,17 +946,19 @@ def _workspace_directory_has_existing_data(workspace_dir: Path) -> bool:
         return True
     return True
 
-                     
-def create_workspace(directory : str | Path,
-                     origin_def : str | Path,
-                     origin_verilog : str | Path,
-                     pdk : PDK | str,
-                     parameters : Parameters | dict,
-                     input_filelist : str | Path = "",
-                     pdk_root : str | Path = "",
-                     pdk_json : str | Path = "",
-                     flow_config : dict | None = None,
-                     sdc : str | Path = "") -> Workspace:
+
+def create_workspace(
+    directory: str | Path,
+    origin_def: str | Path,
+    origin_verilog: str | Path,
+    pdk: PDK | str,
+    parameters: Parameters | dict,
+    input_filelist: str | Path = "",
+    pdk_root: str | Path = "",
+    pdk_json: str | Path = "",
+    flow_config: dict | None = None,
+    sdc: str | Path = "",
+) -> Workspace:
     """
     Create a workspace for chip design flow.
 
@@ -981,47 +992,45 @@ def create_workspace(directory : str | Path,
 
     try:
         workspace_dir.mkdir(parents=True, exist_ok=True)
-    except OSError as error:
+    except OSError:
         return None
-    
+
     # create workspace instance
     workspace = Workspace()
-    
-    # pdk 
+
+    # pdk
     if isinstance(pdk, PDK):
         workspace.pdk = pdk
-        
+
     if isinstance(pdk, str):
         workspace.pdk = get_pdk(pdk_name=pdk, pdk_root=pdk_root, pdk_config=pdk_json)
 
     explicit_sdc_path = Path(sdc).expanduser().resolve() if sdc else None
     if explicit_sdc_path is not None:
         workspace.pdk.sdc = explicit_sdc_path
-    
-    #update config
+
+    # update config
     if isinstance(parameters, Parameters):
         workspace.design.name = parameters.data["Design"]
-        workspace.design.top_module = parameters.data["Top module"]         
+        workspace.design.top_module = parameters.data["Top module"]
         workspace.parameters = parameters
-    
+
     if isinstance(parameters, dict):
         # format parameters
         pdk_name = workspace.pdk.name or (pdk if isinstance(pdk, str) else "")
         workspace.parameters = get_parameters(pdk_name)
-        update_parameters(parameters_src=parameters,
-                          parameters_target=workspace.parameters.data)
-        
+        update_parameters(parameters_src=parameters, parameters_target=workspace.parameters.data)
+
         workspace.design.name = workspace.parameters.data["Design"]
-        workspace.design.top_module = workspace.parameters.data["Top module"]         
-    
+        workspace.design.top_module = workspace.parameters.data["Top module"]
+
     # update path
     workspace.directory = workspace_dir
     workspace.config = build_workspace_config_paths(workspace)
-    
+
     # create logger first (needed for copy operations)
     log_dir.mkdir(parents=True, exist_ok=True)
-    workspace.logger = create_logger(name=workspace.parameters.data["Design"],
-                                     log_dir=log_dir)
+    workspace.logger = create_logger(name=workspace.parameters.data["Design"], log_dir=log_dir)
 
     # update orign files to workspace origin folder
     origin_dir.mkdir(parents=True, exist_ok=True)
@@ -1047,11 +1056,13 @@ def create_workspace(directory : str | Path,
     if input_filelist_path and input_filelist_path.exists():
         try:
             # Use new copy_filelist_with_sources to copy filelist + all RTL files
-            workspace.design.input_filelist = Path(copy_filelist_with_sources(
-                input_filelist=str(input_filelist_path),
-                workspace_dir=str(workspace_dir),
-                logger=workspace.logger
-            ))
+            workspace.design.input_filelist = Path(
+                copy_filelist_with_sources(
+                    input_filelist=str(input_filelist_path),
+                    workspace_dir=str(workspace_dir),
+                    logger=workspace.logger,
+                )
+            )
         except Exception as e:
             workspace.logger.error(f"Failed to copy filelist sources: {e}")
             workspace.logger.warning("Falling back to copying only filelist file")
@@ -1068,7 +1079,7 @@ def create_workspace(directory : str | Path,
         # create default sdc file
         workspace.pdk.sdc = origin_dir / f"{workspace.design.name}.sdc"
         create_default_sdc(workspace)
-        
+
     if workspace.pdk.spef and workspace.pdk.spef.exists():
         spef_target = origin_dir / workspace.pdk.spef.name
         shutil.copy(workspace.pdk.spef, spef_target)
@@ -1090,7 +1101,7 @@ def create_workspace(directory : str | Path,
 
         workspace.flow.data = dynamic_flow_data
         json_write(workspace.flow.path, workspace.flow.data)
-    
+
     if workspace.pdk.root:
         workspace.parameters.data["PDK Root"] = str(workspace.pdk.root)
     if pdk_json:
@@ -1100,30 +1111,31 @@ def create_workspace(directory : str | Path,
 
     # save parameter
     save_parameter(workspace.parameters)
-    
+
     log_workspace(workspace)
     log_parameters(workspace)
-     
+
     return workspace
 
-def load_workspace(directory : str | Path) -> Workspace:
+
+def load_workspace(directory: str | Path) -> Workspace:
     workspace_dir = Path(directory).expanduser().resolve()
     origin_dir = workspace_dir / "origin"
     home_dir = workspace_dir / "home"
     if not workspace_dir.exists():
         return None
-    
+
     # create workspace instance
     workspace = Workspace()
     workspace.directory = workspace_dir
     workspace.config = build_workspace_config_paths(workspace)
 
     parameters = load_parameter(home_dir / "parameters.json")
-    if len(parameters.data)<=0:
+    if len(parameters.data) <= 0:
         return None
-    
+
     workspace.parameters = parameters
-    
+
     pdk = get_pdk(
         pdk_name=parameters.data.get("PDK", ""),
         pdk_root=parameters.data.get("PDK Root", ""),
@@ -1135,9 +1147,10 @@ def load_workspace(directory : str | Path) -> Workspace:
     spef_path = list(origin_dir.rglob("*.spef"))
     if len(spef_path) > 0:
         pdk.spef = spef_path[0]
-        
+
     # update lef and lib paths based on config
     from chipcompiler.utility import json_read
+
     db_json = json_read(workspace.config.get("db", ""))
     if db_json.get("INPUT", {}).get("tech_lef_path", "") != "":
         pdk.tech = Path(db_json.get("INPUT", {}).get("tech_lef_path", ""))
@@ -1146,28 +1159,28 @@ def load_workspace(directory : str | Path) -> Workspace:
     if db_json.get("INPUT", {}).get("lib_path", []) != []:
         pdk.libs = [Path(path) for path in db_json.get("INPUT", {}).get("lib_path", [])]
     workspace.pdk = pdk
-    
-    #update config
+
+    # update config
     workspace.design.name = parameters.data.get("Design", "")
-    workspace.design.top_module = parameters.data.get("Top module", "")  
+    workspace.design.top_module = parameters.data.get("Top module", "")
     def_path = list(origin_dir.rglob("*.def"))
     def_gz_path = list(origin_dir.rglob("*.def.gz"))
     if len(def_path) > 0:
         workspace.design.origin_def = def_path[0]
     if len(def_gz_path) > 0:
         workspace.design.origin_def = def_gz_path[0]
-        
+
     verilog_path = list(origin_dir.rglob("*.v"))
     verilog_gz_path = list(origin_dir.rglob("*.v.gz"))
     if len(verilog_path) > 0:
         workspace.design.origin_verilog = verilog_path[0]
     if len(verilog_gz_path) > 0:
         workspace.design.origin_verilog = verilog_gz_path[0]
-    
+
     filelist_path = origin_dir / "filelist"
     if filelist_path.exists():
         workspace.design.input_filelist = filelist_path
-        
+
     # set home data
     home_dir.mkdir(parents=True, exist_ok=True)
     workspace.config["dir"].mkdir(parents=True, exist_ok=True)
@@ -1176,21 +1189,21 @@ def load_workspace(directory : str | Path) -> Workspace:
     workspace.home.set_flow(workspace.flow.path)
     workspace.home.set_checklist(home_dir / "checklist.json")
     workspace.home.set_parameters(workspace.parameters.path)
-    
+
     # create logger first (needed for copy operations)
-    workspace.logger = create_logger(name=parameters.data["Design"],
-                                     log_dir=workspace_dir / "log")
-    
+    workspace.logger = create_logger(name=parameters.data["Design"], log_dir=workspace_dir / "log")
+
     log_workspace(workspace)
     log_parameters(workspace)
 
     return workspace
 
-def log_workspace(workspace : Workspace):
-    def format_string(text : str, len=20) -> str:
+
+def log_workspace(workspace: Workspace):
+    def format_string(text: str, len=20) -> str:
         return text.ljust(len, " ")
-    
-    workspace.logger.log_section("workspace info") 
+
+    workspace.logger.log_section("workspace info")
     workspace.logger.info("workspace      : %s", workspace.directory)
     workspace.logger.info("config         : %s", workspace.config.get("dir", ""))
     workspace.logger.info("PDK            : %s", workspace.pdk.name)
@@ -1201,31 +1214,38 @@ def log_workspace(workspace : Workspace):
     workspace.logger.info("input filelist : %s", workspace.design.input_filelist)
     workspace.logger.info("sdc            : %s", workspace.pdk.sdc)
     workspace.logger.info("spef           : %s", workspace.pdk.spef)
-    
-def log_parameters(workspace : Workspace):       
-    workspace.logger.log_section("parameters info") 
+
+
+def log_parameters(workspace: Workspace):
+    workspace.logger.log_section("parameters info")
     workspace.logger.info("parameters     : %s", workspace.parameters.path)
     workspace.logger.info("\n%s", dict_to_str(workspace.parameters.data))
-    
-def log_flow(workspace : Workspace):
-    def format_string(text : str, len=20) -> str:
+
+
+def log_flow(workspace: Workspace):
+    def format_string(text: str, len=20) -> str:
         return text.ljust(len, " ")
-        
+
     workspace.logger.log_section("flow info")
     workspace.logger.info("flow           : %s", workspace.flow.path)
-    workspace.logger.info("%s | %s | %s | %s", 
-                              format_string("name"),
-                              format_string("tool"),
-                              format_string("state"),
-                              format_string("runtime"))
+    workspace.logger.info(
+        "%s | %s | %s | %s",
+        format_string("name"),
+        format_string("tool"),
+        format_string("state"),
+        format_string("runtime"),
+    )
     for step in workspace.flow.data.get("steps", []):
-        workspace.logger.info("%s | %s | %s | %s", 
-                              format_string(step.get("name", "")),
-                              format_string(step.get("tool", "")),
-                              format_string(step.get("state", "")),
-                              format_string(step.get("runtime", "")))
+        workspace.logger.info(
+            "%s | %s | %s | %s",
+            format_string(step.get("name", "")),
+            format_string(step.get("tool", "")),
+            format_string(step.get("state", "")),
+            format_string(step.get("runtime", "")),
+        )
 
-def create_default_sdc(workspace : Workspace):
+
+def create_default_sdc(workspace: Workspace):
     """
     Create SDC file based on PDK and workspace parameters.
     """
@@ -1234,11 +1254,13 @@ def create_default_sdc(workspace : Workspace):
     sdc_content.append("\n")
     sdc_content.append("set clk_name {} \n".format(workspace.parameters.data.get("Clock", "")))
     sdc_content.append("set clk_port_name {}\n".format(workspace.parameters.data.get("Clock", "")))
-    sdc_content.append("set clk_freq_mhz {}\n".format(workspace.parameters.data.get("Frequency max [MHz]", 100)))
+    sdc_content.append(
+        "set clk_freq_mhz {}\n".format(workspace.parameters.data.get("Frequency max [MHz]", 100))
+    )
     sdc_content.append("set clk_period [expr 1000.0 / $clk_freq_mhz]\n")
     sdc_content.append("set clk_io_pct 0.2\n")
     sdc_content.append("set clk_port [get_ports $clk_port_name]\n")
     sdc_content.append("create_clock -name $clk_name -period $clk_period $clk_port\n")
-    
-    with open(workspace.pdk.sdc, 'w') as file:
+
+    with open(workspace.pdk.sdc, "w") as file:
         file.writelines(sdc_content)

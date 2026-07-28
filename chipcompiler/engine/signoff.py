@@ -105,7 +105,7 @@ class SignoffPackageCollector:
         issues: list[SignoffPackageIssue] = []
 
         def add_file(
-            role: str, source: Path | None, destination: str, required: bool = False
+            role: str, source: Path | None, destination: str, *, required: bool = False
         ) -> None:
             self._add_file(
                 workspace_dir=workspace_dir,
@@ -535,6 +535,7 @@ class SignoffPackageCollector:
         role: str,
         source: Path | None,
         destination: str,
+        *,
         required: bool,
         copied: list[dict],
         missing_required: list[str],
@@ -593,6 +594,7 @@ class SignoffPackageCollector:
         copied: list[dict],
         missing_optional: list[str],
         issues: list[SignoffPackageIssue],
+        *,
         materialize: bool,
     ) -> None:
         if not source_dir.is_dir():
@@ -620,6 +622,7 @@ class SignoffPackageCollector:
         copied: list[dict],
         missing_optional: list[str],
         issues: list[SignoffPackageIssue],
+        *,
         materialize: bool,
     ) -> None:
         patterns = [
@@ -784,7 +787,7 @@ class SignoffPackageCollector:
                 and previous_step.name == StepEnum.RCX.value
                 and workspace_step.name == StepEnum.STA.value
             ):
-                workspace_step.output["spef"] = previous_step.output.get("spef", [])
+                workspace_step.output.spef = previous_step.output.spef
 
             previous_step = workspace_step
             if flow_step.get("state") != StateEnum.Success.value:
@@ -828,9 +831,9 @@ class SignoffPackageCollector:
             input_verilog = self.workspace.design.origin_verilog
             input_db = None
         else:
-            input_def = previous_step.output.get("def", "")
-            input_verilog = previous_step.output.get("verilog", "")
-            input_db = previous_step.output.get("db", "")
+            input_def = previous_step.output.def_
+            input_verilog = previous_step.output.verilog
+            input_db = previous_step.output.db
         return build_step(
             workspace=self.workspace,
             step_name=step_name,
@@ -958,6 +961,7 @@ class SignoffPackageCollector:
     def _analysis_issue(
         self,
         step_name: str,
+        *,
         required: bool,
         reason: str,
         kind: str,

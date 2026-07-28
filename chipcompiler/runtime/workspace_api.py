@@ -15,8 +15,8 @@ from chipcompiler.runtime.requests import (
     WorkspaceCreateRequest,
     WorkspaceExportSignoffRequest,
     WorkspaceIdRequest,
-    WorkspaceInspectSignoffRequest,
     WorkspaceInfoRequest,
+    WorkspaceInspectSignoffRequest,
     WorkspaceOpenRequest,
     WorkspaceSyncConfigRequest,
 )
@@ -261,7 +261,7 @@ class WorkspaceRuntimeApi:
                 )
                 if not step_already_succeeded:
                     _init_db_engine_for_workspace_step(engine_flow, workspace_step)
-                state = engine_flow.run_step(workspace_step, request.rerun)
+                state = engine_flow.run_step(workspace_step, rerun=request.rerun)
             finally:
                 if should_capture:
                     self._capture_flow_db(
@@ -417,7 +417,7 @@ class WorkspaceRuntimeApi:
         data_api.prepare_workspace_for_rerun(workspace, engine_flow)
 
 
-def build_flow_for_workspace(workspace, create_step_workspaces: bool = True):
+def build_flow_for_workspace(workspace, *, create_step_workspaces: bool = True):
     import chipcompiler.engine as engine_api
     import chipcompiler.rtl2gds as rtl2gds_api
 
@@ -529,9 +529,9 @@ def _build_workspace_step_for_info(workspace, flow_step: dict, previous_step):
         input_verilog = workspace.design.origin_verilog
         input_db = None
     else:
-        input_def = previous_step.output.get("def", "")
-        input_verilog = previous_step.output.get("verilog", "")
-        input_db = previous_step.output.get("db", "")
+        input_def = previous_step.output.def_ or ""
+        input_verilog = previous_step.output.verilog or ""
+        input_db = previous_step.output.db or ""
 
     builder = _load_tool_builder(tool)
     if builder is None or not hasattr(builder, "build_step"):

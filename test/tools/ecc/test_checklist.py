@@ -2,8 +2,18 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
-from chipcompiler.data import StepEnum
-from chipcompiler.tools.ecc.checklist import EccStaChecklist
+from chipcompiler.data import (
+    ChecklistState,
+    EccAnalysis,
+    EccFeature,
+    EccOutput,
+    EccReport,
+    EccStep,
+    OriginDesign,
+    StepEnum,
+    Workspace,
+)
+from chipcompiler.tools.ecc.checklist import EccRcxChecklist, EccStaChecklist
 from chipcompiler.tools.ecc.sta_qor import sta_qor_summary_paths
 
 
@@ -46,10 +56,10 @@ def test_sta_checklist_references_v4_quality_gates_and_current_artifacts(tmp_pat
     workspace = SimpleNamespace()
     step = SimpleNamespace(
         name=StepEnum.STA.value,
-        checklist={"path": str(checklist_path)},
-        analysis={"qor_summary": str(summary_path)},
-        report={"dir": str(report_root.parent.parent)},
-        feature={"dir": str(feature_root.parent.parent)},
+        checklist=ChecklistState(path=checklist_path),
+        analysis=EccAnalysis(qor_summary=summary_path),
+        report=EccReport(dir=report_root.parent.parent),
+        feature=EccFeature(dir=feature_root.parent.parent),
     )
 
     assert EccStaChecklist(workspace, step).check() is True
@@ -69,10 +79,10 @@ def test_sta_checklist_blocks_missing_v4_gate_summary(tmp_path):
     workspace = SimpleNamespace()
     step = SimpleNamespace(
         name=StepEnum.STA.value,
-        checklist={"path": str(checklist_path)},
-        analysis={"qor_summary": str(tmp_path / "sta_ecc" / "analysis" / "qor_summary.json")},
-        report={"dir": str(tmp_path / "sta_ecc" / "report")},
-        feature={"dir": str(tmp_path / "sta_ecc" / "feature")},
+        checklist=ChecklistState(path=checklist_path),
+        analysis=EccAnalysis(qor_summary=tmp_path / "sta_ecc" / "analysis" / "qor_summary.json"),
+        report=EccReport(dir=tmp_path / "sta_ecc" / "report"),
+        feature=EccFeature(dir=tmp_path / "sta_ecc" / "feature"),
     )
 
     assert EccStaChecklist(workspace, step).check() is False
@@ -90,3 +100,25 @@ def test_sta_summary_paths_do_not_fallback_to_obsolete_output(tmp_path):
     _write(output_path, {"schema_version": 1})
 
     assert sta_qor_summary_paths(workspace, feature_root) == []
+
+
+def test_collect_rcx_spef_paths_appends_discovered_spefs_to_live_output_list(tmp_path):
+    # Legacy contract: output.get("spef", []) returned the builder's own list, so
+    # extend(glob(...)) added discovered output-dir SPEFs to step.output.spef in place.
+    # The typed reader must preserve that live-list mutation, not copy.
+    output_dir = tmp_path / "rcx_ecc" / "output"
+    _write(output_dir / "discovered.spef", "* spef\n")
+
+    workspace = Workspace(design=OriginDesign(name="gcd", top_module="gcd"))
+    workspace_step = EccStep(
+        name=StepEnum.RCX.value,
+        output=EccOutput(spef=[], dir=output_dir),
+    )
+    # init_checklist=False: exercise only the SPEF reader, not checklist building.
+    checker = EccRcxChecklist(workspace, workspace_step, init_checklist=False)
+
+    returned = checker.collect_rcx_spef_paths()
+
+    assert returned == [str(output_dir / "discovered.spef")]
+    # the discovered SPEF is reflected on the step's live output list (main parity)
+    assert workspace_step.output.spef == [str(output_dir / "discovered.spef")]
