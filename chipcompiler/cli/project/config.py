@@ -3,9 +3,25 @@ import tomllib
 from dataclasses import dataclass, field
 
 SUPPORTED_PDK_NAMES = {"ics55"}
-SUPPORTED_FLOW_RUNS = {"default"}
 FILELIST_SUFFIXES = {".f", ".fl", ".filelist"}
 RTL_SUFFIXES = {".v", ".sv", ".svh", ".vh"}
+
+
+class InvalidFlowRun:
+    """config_run_id result for a [flow] run value that cannot name a run directory."""
+
+    def __init__(self, problem: str) -> None:
+        self.problem = problem
+
+
+def _flow_run_problem(value: object) -> str | None:
+    """Return the rejection reason for a present [flow] run value, or None."""
+    if isinstance(value, str):
+        if value == "default":
+            return None
+        if value and value == value.strip() and "\x00" not in value:
+            return None
+    return f"unsupported flow.run: {value}"
 
 
 # TODO: Move ecc.toml parsing and validation into chipcompiler.data.project_config
@@ -33,6 +49,7 @@ class ProjectConfig:
     _toml_error: str | None = field(default=None, init=False, repr=False)
     _param_errors: list[str] = field(default_factory=list, init=False, repr=False)
     _pdk_config_errors: list[str] = field(default_factory=list, init=False, repr=False)
+    _flow_run_error: str | None = field(default=None, init=False, repr=False)
 
 
 def load_project_config(config_path: str) -> ProjectConfig:
@@ -76,6 +93,8 @@ def _parse_config(data: dict, config_path: str) -> ProjectConfig:
     pdk_overrides_raw = pdk.get("overrides", {})
     pdk_overrides = {} if not isinstance(pdk_overrides_raw, dict) else pdk_overrides_raw
 
+    raw_run = flow.get("run", "default")
+
     cfg = ProjectConfig(
         design_name=_str(design.get("name", "")),
         design_top=_str(design.get("top", "")),
@@ -86,10 +105,12 @@ def _parse_config(data: dict, config_path: str) -> ProjectConfig:
         pdk_root=_str(pdk.get("root", "")),
         pdk_overrides=pdk_overrides,
         flow_preset=_str(flow.get("preset", "")),
-        flow_run=_str(flow.get("run", "default"), "default"),
+        flow_run=_str(raw_run, "default"),
         config_path=config_path,
         project_dir=project_dir,
     )
+
+    cfg._flow_run_error = _flow_run_problem(raw_run)
 
     if not isinstance(pdk_overrides_raw, dict):
         cfg._pdk_config_errors = [
@@ -117,6 +138,38 @@ def resolve_project_dir(project: str | None) -> str:
 def find_config_path(project_dir: str) -> str | None:
     path = os.path.join(project_dir, "ecc.toml")
     return path if os.path.isfile(path) else None
+
+
+def load_run_config(project_dir: str) -> ProjectConfig | None:
+    """Parse the project's ecc.toml; None when it is missing or unreadable."""
+    config_path = find_config_path(project_dir)
+    if config_path is None:
+        return None
+    try:
+        return load_project_config(config_path)
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
+def config_run_id_from(cfg: ProjectConfig | None) -> str | InvalidFlowRun | None:
+    """Apply the canonical [flow] run rule to an already-parsed config."""
+    if cfg is None or cfg._toml_error:
+        return None
+    if cfg._flow_run_error is not None:
+        return InvalidFlowRun(cfg._flow_run_error)
+    if cfg.flow_run == "default":
+        return None
+    return cfg.flow_run
+
+
+def config_run_id(project_dir: str) -> str | InvalidFlowRun | None:
+    """Return the [flow] run id configured in the project's ecc.toml.
+
+    None when the key is absent, is "default", or the config cannot be read;
+    InvalidFlowRun when the key is present but cannot name a run directory;
+    otherwise the run id string.
+    """
+    return config_run_id_from(load_run_config(project_dir))
 
 
 def _supported_flow_presets() -> set[str]:
@@ -171,8 +224,8 @@ def validate_project_config(cfg: ProjectConfig) -> list[str]:
     elif cfg.flow_preset not in _supported_flow_presets():
         errors.append(f"unsupported flow.preset: {cfg.flow_preset}")
 
-    if cfg.flow_run and cfg.flow_run not in SUPPORTED_FLOW_RUNS:
-        errors.append(f"unsupported flow.run: {cfg.flow_run}")
+    if cfg._flow_run_error:
+        errors.append(cfg._flow_run_error)
 
     if len(cfg.design_rtl) == 1:
         rtl_path = _resolve_path(cfg.project_dir, cfg.design_rtl[0])
