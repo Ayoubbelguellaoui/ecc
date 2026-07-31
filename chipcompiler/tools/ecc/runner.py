@@ -17,6 +17,24 @@ from chipcompiler.tools.ecc.subflow import EccSubFlow, EccSubFlowEnum
 from chipcompiler.tools.ecc.utility import is_eda_exist
 from chipcompiler.utility import json_read
 
+_GEOMETRY_SNAPSHOT_STEPS = frozenset(
+    {
+        StepEnum.FLOORPLAN.value,
+        StepEnum.NETLIST_OPT.value,
+        StepEnum.PLACEMENT.value,
+        StepEnum.CTS.value,
+        StepEnum.PNP.value,
+        StepEnum.TIMING_OPT.value,
+        StepEnum.TIMING_OPT_DRV.value,
+        StepEnum.TIMING_OPT_HOLD.value,
+        StepEnum.TIMING_OPT_SETUP.value,
+        StepEnum.LEGALIZATION.value,
+        StepEnum.ROUTING.value,
+        StepEnum.DRC.value,
+        StepEnum.FILLER.value,
+    }
+)
+
 
 def temperature_token(temperature) -> str:
     try:
@@ -322,11 +340,11 @@ def run_sta_without_spef(
         workspace.logger.warning("Post-synthesis STA failed; synthesis result is kept: %s", exc)
         return False
 
-    workspace.logger.info(
-        "Post-synthesis STA artifacts saved to report=%s feature=%s",
-        report_dir,
-        feature_dir,
-    )
+        workspace.logger.info(
+            "Post-synthesis STA artifacts saved to report=%s feature=%s",
+            report_dir,
+            feature_dir,
+        )
     return True
 
 
@@ -344,16 +362,25 @@ def save_data(
     """
     if ecc_module is None:
         return False
-
     ecc_module.def_save(def_path=step.output.def_ or "")
     ecc_module.verilog_save(output_verilog=step.output.verilog or "")
     ecc_module.gds_save(output_path=step.output.gds or "")
     ecc_module.save_data(path=step.output.db or "")
-    # ecc_module.json_save(path=step.output.json or "")
-    ecc_module.view_json_save(
-        output_dir=step.output.view_json or "", json_format="compact", compress=True
-    )
-    ecc_module.view_json_apply_edits(edits_path=step.output.view_json_edits or "", compress=True)
+    if step.name in _GEOMETRY_SNAPSHOT_STEPS:
+        geometry_dir = step.output.geometry or ""
+        geometry_manifest = step.output.geometry_manifest
+        if not ecc_module.geometry_snapshot_save(output_dir=geometry_dir):
+            workspace.logger.error("Failed to write geometry snapshot for %s", step.name)
+            return False
+        if geometry_manifest is None or not geometry_manifest.is_file():
+            workspace.logger.error(
+                "Geometry snapshot manifest is missing for %s: %s",
+                step.name,
+                geometry_manifest,
+            )
+            return False
+    # View JSON serialization is intentionally skipped. The GUI reads the
+    # geometry snapshot generated above instead.
     ecc_module.feature_sammry(json_path=step.feature.db or "")
     if feature_step:
         ecc_module.feature_step(step=step.name, json_path=step.feature.step or "")

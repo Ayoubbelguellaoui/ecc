@@ -61,6 +61,27 @@ class CompleteFakeApi:
     def db_release(self, _request):
         raise AssertionError("unexpected db_release call")
 
+    def layout_edit_begin(self, _request):
+        raise AssertionError("unexpected layout_edit_begin call")
+
+    def layout_edit_apply(self, _request):
+        raise AssertionError("unexpected layout_edit_apply call")
+
+    def layout_edit_save(self, _request):
+        raise AssertionError("unexpected layout_edit_save call")
+
+    def layout_edit_discard(self, _request):
+        raise AssertionError("unexpected layout_edit_discard call")
+
+    def floorplan_edit_inspect(self, _request):
+        raise AssertionError("unexpected floorplan_edit_inspect call")
+
+    def floorplan_edit_run_auto(self, _request):
+        raise AssertionError("unexpected floorplan_edit_run_auto call")
+
+    def floorplan_edit_validate(self, _request):
+        raise AssertionError("unexpected floorplan_edit_validate call")
+
 
 def test_rpc_hello_returns_version_and_capabilities():
     server = RuntimeServer()

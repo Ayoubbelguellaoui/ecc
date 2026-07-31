@@ -193,6 +193,31 @@ class ECCToolsModule:
     def create_net(self, net_name: str, conn_type: str = ""):
         return self.ecc.create_net(net_name=net_name, conn_type=conn_type)
 
+    def place_instance(
+        self,
+        inst_name: str,
+        llx: int,
+        lly: int,
+        orient: str,
+        cellmaster: str,
+        source: str = "",
+        placement_status: str = "fixed",
+        *,
+        create_if_missing: bool = True,
+    ):
+        params = {
+            "inst_name": inst_name,
+            "llx": llx,
+            "lly": lly,
+            "orient": orient,
+            "cellmaster": cellmaster,
+            "source": source,
+        }
+        if placement_status != "fixed" or not create_if_missing:
+            params["placement_status"] = placement_status
+            params["create_if_missing"] = create_if_missing
+        return self.ecc.place_instance(**params)
+
     def set_exclude_cell_names(self, cell_names: set):
         self.cell_names = cell_names
 
@@ -273,6 +298,26 @@ class ECCToolsModule:
                 does not already end with ".gz".
         """
         return self.ecc.view_json_apply_edits(edits_path=path_text(edits_path), compress=compress)
+
+    def geometry_snapshot_save(self, output_dir: PathArg):
+        """Export the current in-memory IDB geometry for GUI rendering."""
+        return self.ecc.geometry_snapshot_save(output_dir=path_text(output_dir))
+
+    def initialize_geometry_session(self):
+        """Begin a geometry edit session for incremental GUI updates."""
+        return self.ecc.initialize_geometry_session()
+
+    def sync_instance_geometry(self, inst_name: str):
+        """Synchronize one edited instance from IDB into the geometry session."""
+        return self.ecc.sync_instance_geometry(inst_name=inst_name)
+
+    def geometry_session_snapshot_save(self, output_dir: PathArg):
+        """Export the incremental geometry-session snapshot for GUI rendering."""
+        return self.ecc.geometry_session_snapshot_save(output_dir=path_text(output_dir))
+
+    def reset_geometry_session(self):
+        """Discard the active geometry edit session."""
+        return self.ecc.reset_geometry_session()
 
     def save_data(self, path: PathArg):
         """save ECC data"""

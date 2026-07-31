@@ -1,4 +1,5 @@
 from .builder import build_step, build_step_config, build_step_space
+from .image import save_snapshot_image
 from .module import KlayoutModule
 from .runner import (
     run_step,
@@ -14,4 +15,5 @@ __all__ = [
     "run_step",
     "KlayoutModule",
     "save_gds_image",
+    "save_snapshot_image",
 ]
