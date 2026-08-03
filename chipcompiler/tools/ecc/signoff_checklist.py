@@ -1,8 +1,8 @@
 """Current-output signoff checklist construction.
 
-QoR owns the five chip-quality gate calculations.  This module only references
-those gate results and owns the separate flow, artifact, and provenance checks
-needed to assemble a signoff package.
+QoR owns chip-quality gate calculations. This module only references those
+gate results and owns the separate flow, artifact, and provenance checks needed
+to assemble a signoff package.
 """
 
 from __future__ import annotations
@@ -11,6 +11,14 @@ import re
 from pathlib import Path
 
 from chipcompiler.data import Checklist, StateEnum, StepEnum, Workspace, WorkspaceStep
+from chipcompiler.tools.ecc.sta_qor import (
+    STA_QOR_SUMMARY_FILENAME,
+    STA_REPORT_FILENAMES,
+    STA_TIMING_PATHS_FILENAME,
+    configured_sta_artifact_directories,
+    read_sta_qor_summary,
+    read_sta_timing_paths,
+)
 from chipcompiler.utility import json_read
 
 _STEP_DIRECTORIES = {
@@ -37,6 +45,10 @@ _QUALITY_GATES_BY_STEP = {
     StepEnum.STA.value: (
         "qor.sta.setup_closed",
         "qor.sta.hold_closed",
+    ),
+    StepEnum.HARDEN.value: (
+        "qor.mpc.minimum_area",
+        "qor.mpc.maximum_area",
     ),
 }
 
@@ -126,7 +138,16 @@ def _prefixed_evidence(step_directory: str, evidence: list) -> list[dict]:
             continue
         item = dict(entry)
         path = item.get("path")
-        if isinstance(path, str) and path and not path.startswith(step_directory + "/"):
+        is_workspace_step_path = isinstance(path, str) and any(
+            path == directory or path.startswith(directory + "/")
+            for directory in _STEP_DIRECTORIES.values()
+        )
+        if (
+            isinstance(path, str)
+            and path
+            and not is_workspace_step_path
+            and not path.startswith(step_directory + "/")
+        ):
             item["path"] = f"{step_directory}/{path}"
         result.append(item)
     return result
@@ -147,13 +168,24 @@ def _gate_summary(gate: dict) -> str:
     return "; ".join(facts) or "QoR gate has no current metric evidence."
 
 
+def _expected_quality_gate_ids(workspace: Workspace, step_name: str) -> tuple[str, ...]:
+    gate_ids = _QUALITY_GATES_BY_STEP.get(step_name, ())
+    if step_name != StepEnum.HARDEN.value:
+        return gate_ids
+
+    parameters = getattr(getattr(workspace, "parameters", None), "data", {})
+    mpc = parameters.get("MPC") if isinstance(parameters, dict) else None
+    core_template = mpc.get("core_template") if isinstance(mpc, dict) else None
+    return gate_ids if isinstance(core_template, dict) else ()
+
+
 def _quality_gate_items_from_summary(
     workspace: Workspace,
     step_name: str,
     step_directory: Path,
     summary_path: Path,
 ) -> list[dict]:
-    expected_gate_ids = _QUALITY_GATES_BY_STEP.get(step_name, ())
+    expected_gate_ids = _expected_quality_gate_ids(workspace, step_name)
     if not expected_gate_ids:
         return []
     step_directory_text = _path_text(workspace, step_directory)
@@ -262,16 +294,48 @@ def _step_artifact_items(workspace: Workspace, step: WorkspaceStep) -> list[dict
     elif step.name == StepEnum.STA.value:
         report_dir = step.report.dir
         feature_dir = step.feature.dir
-        reports = (
-            list(Path(report_dir).rglob("*.rpt"))
-            if report_dir and Path(report_dir).is_dir()
-            else []
-        )
-        summaries = (
-            list(Path(feature_dir).rglob("qor_summary.json"))
-            if feature_dir and Path(feature_dir).is_dir()
-            else []
-        )
+        report_corners = configured_sta_artifact_directories(workspace, report_dir)
+        feature_corners = configured_sta_artifact_directories(workspace, feature_dir)
+        reports = [
+            (corner, path / filename)
+            for corner, path in report_corners
+            for filename in STA_REPORT_FILENAMES
+        ]
+        summaries = [(corner, path / STA_QOR_SUMMARY_FILENAME) for corner, path in feature_corners]
+        timing_paths = [
+            (corner, path / STA_TIMING_PATHS_FILENAME) for corner, path in feature_corners
+        ]
+
+        def item_state(paths, validator=None):
+            if not paths:
+                return "unavailable"
+            if validator is None:
+                return (
+                    "pass" if all(_file_state(path)[0] == "pass" for _, path in paths) else "failed"
+                )
+            return (
+                "pass"
+                if all(validator(corner, path) is not None for corner, path in paths)
+                else "failed"
+            )
+
+        def missing_paths(paths, validator=None):
+            if validator is None:
+                return [
+                    f"{corner}/{path.name}"
+                    for corner, path in paths
+                    if _file_state(path)[0] != "pass"
+                ]
+            return [
+                f"{corner}/{path.name}" for corner, path in paths if validator(corner, path) is None
+            ]
+
+        report_state = item_state(reports)
+        summary_state = item_state(summaries, read_sta_qor_summary)
+        timing_paths_state = item_state(timing_paths, read_sta_timing_paths)
+        report_missing = missing_paths(reports)
+        summary_missing = missing_paths(summaries, read_sta_qor_summary)
+        timing_paths_missing = missing_paths(timing_paths, read_sta_timing_paths)
         return [
             _item(
                 item_id="report.sta.timing_reports",
@@ -279,16 +343,21 @@ def _step_artifact_items(workspace: Workspace, step: WorkspaceStep) -> list[dict
                 category="report",
                 owner="checklist",
                 policy="block",
-                state="pass" if reports else "failed",
+                state=report_state,
                 title="STA timing reports",
                 summary=(
-                    f"{len(reports)} current STA report files are present."
-                    if reports
-                    else "No STA report files are present."
+                    f"{len(reports)} required STA reports are present for "
+                    f"{len(report_corners)} configured corners."
+                    if report_state == "pass"
+                    else (
+                        "No STA signoff corners are configured in config/sta.json."
+                        if report_state == "unavailable"
+                        else f"Missing or empty STA reports: {', '.join(report_missing)}"
+                    )
                 ),
                 source={"kind": "report", "path": _path_text(workspace, report_dir)},
                 evidence=[
-                    {"kind": "report", "path": _path_text(workspace, path)} for path in reports
+                    {"kind": "report", "path": _path_text(workspace, path)} for _, path in reports
                 ],
             ),
             _item(
@@ -297,16 +366,49 @@ def _step_artifact_items(workspace: Workspace, step: WorkspaceStep) -> list[dict
                 category="artifact",
                 owner="checklist",
                 policy="block",
-                state="pass" if summaries else "failed",
+                state=summary_state,
                 title="STA structured corner summaries",
                 summary=(
-                    f"{len(summaries)} current STA corner summaries are present."
-                    if summaries
-                    else "No structured STA corner summaries are present."
+                    f"{len(summaries)} valid STA corner summaries are present."
+                    if summary_state == "pass"
+                    else (
+                        "No STA signoff corners are configured in config/sta.json."
+                        if summary_state == "unavailable"
+                        else (
+                            f"Missing or invalid STA corner summaries: {', '.join(summary_missing)}"
+                        )
+                    )
                 ),
                 source={"kind": "feature", "path": _path_text(workspace, feature_dir)},
                 evidence=[
-                    {"kind": "feature", "path": _path_text(workspace, path)} for path in summaries
+                    {"kind": "feature", "path": _path_text(workspace, path)}
+                    for _, path in summaries
+                ],
+            ),
+            _item(
+                item_id="artifact.sta.timing_paths",
+                step=step.name,
+                category="artifact",
+                owner="checklist",
+                policy="block",
+                state=timing_paths_state,
+                title="STA structured timing paths",
+                summary=(
+                    f"{len(timing_paths)} valid STA timing-path artifacts are present."
+                    if timing_paths_state == "pass"
+                    else (
+                        "No STA signoff corners are configured in config/sta.json."
+                        if timing_paths_state == "unavailable"
+                        else (
+                            "Missing or invalid STA timing paths: "
+                            f"{', '.join(timing_paths_missing)}"
+                        )
+                    )
+                ),
+                source={"kind": "feature", "path": _path_text(workspace, feature_dir)},
+                evidence=[
+                    {"kind": "feature", "path": _path_text(workspace, path)}
+                    for _, path in timing_paths
                 ],
             ),
         ]
