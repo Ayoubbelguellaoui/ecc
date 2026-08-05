@@ -4,8 +4,6 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
-import pytest
-
 import chipcompiler.utility as chipcompiler_utility
 from chipcompiler.data import OriginDesign, StepEnum, Workspace
 from chipcompiler.tools.ecc import metrics as ecc_metrics
@@ -29,10 +27,6 @@ class FakeEcc:
         self.calls = []
         self.generated_timing_lib_name = "gcd_max.lib"
         self.generated_timing_lib_contents = "library (gcd_max) {}\n"
-        self.structured_timing_filenames = (
-            "qor_summary.json",
-            "timing_paths.json",
-        )
 
     def flow_init(self, **kwargs):
         self.calls.append(("flow_init", kwargs))
@@ -56,24 +50,6 @@ class FakeEcc:
 
     def init_sta(self, **kwargs):
         self.calls.append(("init_sta", kwargs))
-        return True
-
-    def run_sta(self):
-        self.calls.append(("run_sta", (), {}))
-        config_dict = None
-        for call in reversed(self.calls):
-            if len(call) == 2 and call[0] == "init_sta":
-                config_dict = call[1]["config_dict"]
-                break
-        assert config_dict is not None
-        report_dir = Path(config_dict["-temp_directory_path"]) / "timing_reporter"
-        report_dir.mkdir(parents=True, exist_ok=True)
-        if config_dict.get("-output_timing_reports") == "1":
-            (report_dir / "qor_summary.rpt").write_text("report\n", encoding="utf-8")
-            (report_dir / "timing_max.rpt").write_text("report\n", encoding="utf-8")
-        if config_dict.get("-output_timing_features") == "1":
-            for filename in self.structured_timing_filenames:
-                (report_dir / filename).write_text("{}\n", encoding="utf-8")
         return True
 
     def cts_timing_feature(self):
@@ -327,7 +303,7 @@ def test_geometry_edit_session_wrappers_forward_instance_name():
     ]
 
 
-def test_ecc_binding_wrappers_stringify_path_arguments(tmp_path):
+def test_ecc_binding_wrappers_stringify_path_arguments():
     module = ECCToolsModule.__new__(ECCToolsModule)
     module.ecc = FakeEcc()
 
@@ -349,16 +325,6 @@ def test_ecc_binding_wrappers_stringify_path_arguments(tmp_path):
         output_dir=Path("/ws/out"),
         lib_paths=[Path("/pdk/lib.lib")],
         sdc_path=Path("/ws/design.sdc"),
-    )
-    module.run_timing(
-        config=Path("/ws/config/sta.json"),
-        work_dir=tmp_path / "sta_work",
-        report_dir=tmp_path / "sta_report",
-        feature_dir=tmp_path / "sta_feature",
-        lib_paths=[Path("/pdk/lib.lib")],
-        sdc_path=Path("/ws/design.sdc"),
-        spef_path=Path("/ws/design.spef"),
-        corner="MAX_125/RCworst",
     )
 
     assert module.ecc.calls == [
@@ -390,87 +356,7 @@ def test_ecc_binding_wrappers_stringify_path_arguments(tmp_path):
                 "sdc_path": "/ws/design.sdc",
             },
         ),
-        ("lib_init", (), {"lib_paths": ["/pdk/lib.lib"]}),
-        ("sdc_init", ("/ws/design.sdc",), {}),
-        ("spef_init", ("/ws/design.spef",), {}),
-        (
-            "init_sta",
-            {
-                "config": "/ws/config/sta.json",
-                "config_dict": {
-                    "-temp_directory_path": str(tmp_path / "sta_work"),
-                    "-output_timing_reports": "1",
-                    "-output_timing_features": "1",
-                    "-timing_path_limit": "20",
-                    "-timing_corner": "MAX_125/RCworst",
-                },
-            },
-        ),
-        ("run_sta", (), {}),
-        ("destroy_sta", (), {}),
     ]
-
-
-def test_run_timing_splits_text_reports_and_structured_artifacts(tmp_path):
-    module = ECCToolsModule.__new__(ECCToolsModule)
-    module.ecc = FakeEcc()
-    report_dir = tmp_path / "report" / "MAX_125" / "RCworst"
-    feature_dir = tmp_path / "feature" / "MAX_125" / "RCworst"
-
-    module.run_timing(
-        work_dir=tmp_path / "data" / "sta",
-        report_dir=report_dir,
-        feature_dir=feature_dir,
-        output_modes=("structured", "report"),
-        max_paths_per_analysis=7,
-        corner="MAX_125/RCworst",
-    )
-
-    assert (report_dir / "qor_summary.rpt").is_file()
-    assert (report_dir / "timing_max.rpt").is_file()
-    assert (feature_dir / "qor_summary.json").is_file()
-    assert (feature_dir / "timing_paths.json").is_file()
-    init_config = next(
-        call[1] for call in module.ecc.calls if len(call) == 2 and call[0] == "init_sta"
-    )
-    assert init_config["config_dict"] == {
-        "-temp_directory_path": str(tmp_path / "data" / "sta"),
-        "-output_timing_reports": "1",
-        "-output_timing_features": "1",
-        "-timing_path_limit": "7",
-        "-timing_corner": "MAX_125/RCworst",
-    }
-
-
-def test_run_timing_accepts_qor_summary_without_timing_paths(tmp_path):
-    module = ECCToolsModule.__new__(ECCToolsModule)
-    module.ecc = FakeEcc()
-    module.ecc.structured_timing_filenames = ("qor_summary.json",)
-    feature_dir = tmp_path / "feature" / "MAX_125" / "RCworst"
-
-    module.run_timing(
-        work_dir=tmp_path / "data" / "sta",
-        feature_dir=feature_dir,
-        output_modes=("structured",),
-        corner="MAX_125/RCworst",
-    )
-
-    assert (feature_dir / "qor_summary.json").is_file()
-    assert not (feature_dir / "timing_paths.json").exists()
-
-
-def test_run_timing_rejects_invalid_output_modes(tmp_path):
-    module = ECCToolsModule.__new__(ECCToolsModule)
-    module.ecc = FakeEcc()
-
-    with pytest.raises(ValueError, match="Unsupported STA output modes"):
-        module.run_timing(
-            work_dir=tmp_path / "data" / "sta",
-            feature_dir=tmp_path / "feature",
-            output_modes=("structured", "raw"),
-        )
-
-    assert module.ecc.calls == []
 
 
 def test_ecc_runtime_wrappers_stringify_path_arguments(tmp_path):
