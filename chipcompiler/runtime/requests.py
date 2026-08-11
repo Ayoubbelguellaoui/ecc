@@ -72,6 +72,37 @@ class FlowRunStepRequest:
 
 
 @dataclass(frozen=True)
+class OperationStartFlowRequest:
+    workspace_id: str
+    rerun: bool = False
+    origin: str = "gui"
+    idempotency_key: str = ""
+
+
+@dataclass(frozen=True)
+class OperationStartStepRequest:
+    workspace_id: str
+    step: str
+    rerun: bool = False
+    reset_dependents: bool = False
+    origin: str = "gui"
+    idempotency_key: str = ""
+
+
+@dataclass(frozen=True)
+class OperationIdRequest:
+    operation_id: str
+
+
+@dataclass(frozen=True)
+class OperationAckStepRenderedRequest:
+    operation_id: str
+    event_id: str
+    step_commit_id: str = ""
+    workspace_revision: int | None = None
+
+
+@dataclass(frozen=True)
 class DbEnsureRequest:
     workspace_id: str
     step: str = ""
@@ -142,6 +173,12 @@ FIELD_ALIASES = {
     "paramJson": "parameters",
     "rtlList": "rtl_list",
     "workspaceId": "workspace_id",
+    "operationId": "operation_id",
+    "eventId": "event_id",
+    "stepCommitId": "step_commit_id",
+    "workspaceRevision": "workspace_revision",
+    "idempotencyKey": "idempotency_key",
+    "resetDependents": "reset_dependents",
     "configPath": "config_path",
     "outputPath": "output_path",
     "infoId": "info_id",
@@ -178,8 +215,8 @@ def parse_request_model(model: type, params: object):
         if required and _is_missing(values[field.name]):
             raise RequestValidationError(f"missing required field: {field.name}")
 
-        if field.name == "rerun" and not isinstance(values[field.name], bool):
-            raise RequestValidationError("rerun must be a boolean")
+        if field.name in {"rerun", "reset_dependents"} and not isinstance(values[field.name], bool):
+            raise RequestValidationError(f"{field.name} must be a boolean")
 
     return model(**values)
 

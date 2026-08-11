@@ -13,6 +13,10 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any, TypeVar
 
+from chipcompiler.runtime.operations import (
+    RuntimeOperationConflict,
+    RuntimeOperationManager,
+)
 from chipcompiler.runtime.requests import (
     DbEnsureRequest,
     DbReleaseRequest,
@@ -25,6 +29,10 @@ from chipcompiler.runtime.requests import (
     LayoutEditBeginRequest,
     LayoutEditDiscardRequest,
     LayoutEditSaveRequest,
+    OperationAckStepRenderedRequest,
+    OperationIdRequest,
+    OperationStartFlowRequest,
+    OperationStartStepRequest,
     WorkspaceCreateRequest,
     WorkspaceExportSignoffRequest,
     WorkspaceIdRequest,
@@ -58,6 +66,7 @@ class WorkspaceRuntimeApi:
         sessions: WorkspaceSessionRegistry | None = None,
         *,
         persistent_db_enabled: bool = False,
+        event_publisher: Callable[[dict[str, Any]], None] | None = None,
     ):
         self.persistent_db_enabled = persistent_db_enabled
         self.sessions = sessions or WorkspaceSessionRegistry(db_releaser=_close_db_handle)
@@ -68,6 +77,10 @@ class WorkspaceRuntimeApi:
         # session is reset, so a second workspace cannot replace the store
         # underneath an active editor.
         self._layout_edit_lock = threading.RLock()
+        self.operations = RuntimeOperationManager(event_publisher)
+
+    def set_event_publisher(self, publisher: Callable[[dict[str, Any]], None] | None) -> None:
+        self.operations.set_publisher(publisher)
 
     def create_workspace(self, request: WorkspaceCreateRequest) -> dict:
         if not request.directory:
@@ -222,6 +235,15 @@ class WorkspaceRuntimeApi:
         return self._with_session_mutation_lock(request.workspace_id, close)
 
     def flow_run(self, request: FlowRunRequest) -> dict:
+        return self._flow_run(request)
+
+    def _flow_run(
+        self,
+        request: FlowRunRequest,
+        *,
+        observer=None,
+        preserve_user_inputs: bool = False,
+    ) -> dict:
         def run(session: WorkspaceSession) -> dict:
             should_capture = self._should_capture_session_db(session)
             previous_db = session.db_handle if should_capture else None
@@ -234,9 +256,19 @@ class WorkspaceRuntimeApi:
                 attach_session_db=should_capture and not request.rerun,
             )
             if request.rerun:
-                self._prepare_workspace_for_rerun(session.workspace, engine_flow)
+                affected_steps = list(getattr(engine_flow, "workspace_steps", []))
+                self._prepare_workspace_for_rerun(
+                    session.workspace,
+                    engine_flow,
+                    preserve_user_inputs=preserve_user_inputs,
+                )
+                self._notify_rerun_prepared(
+                    observer,
+                    affected_steps,
+                    scope="flow",
+                )
             try:
-                ok = engine_flow.run_steps(rerun=request.rerun)
+                ok = _run_engine_flow_steps(engine_flow, rerun=request.rerun, observer=observer)
             finally:
                 if should_capture:
                     self._capture_flow_db(
@@ -257,6 +289,15 @@ class WorkspaceRuntimeApi:
         return self._with_session_mutation_lock(request.workspace_id, run)
 
     def flow_run_step(self, request: FlowRunStepRequest) -> dict:
+        return self._flow_run_step(request)
+
+    def _flow_run_step(
+        self,
+        request: FlowRunStepRequest,
+        *,
+        observer=None,
+        reset_dependents: bool = False,
+    ) -> dict:
         def run_step(session: WorkspaceSession) -> dict:
             should_capture = self._should_capture_session_db(session)
             previous_db = session.db_handle if should_capture else None
@@ -280,7 +321,22 @@ class WorkspaceRuntimeApi:
             if workspace_step is None:
                 raise RuntimeApiError("command_failed", f"step not found: {request.step}")
             if request.rerun:
-                self._prepare_step_for_rerun(session.workspace, engine_flow, workspace_step)
+                affected_steps = self._rerun_affected_steps(
+                    engine_flow,
+                    workspace_step,
+                    reset_dependents=reset_dependents,
+                )
+                self._prepare_steps_for_rerun(
+                    session.workspace,
+                    engine_flow,
+                    affected_steps,
+                )
+                self._notify_rerun_prepared(
+                    observer,
+                    affected_steps,
+                    scope="step",
+                    target_step=workspace_step.name,
+                )
 
             try:
                 step_already_succeeded = not request.rerun and engine_flow.check_state(
@@ -290,7 +346,12 @@ class WorkspaceRuntimeApi:
                 )
                 if not step_already_succeeded:
                     _init_db_engine_for_workspace_step(engine_flow, workspace_step)
-                state = engine_flow.run_step(workspace_step, rerun=request.rerun)
+                state = _run_engine_flow_step(
+                    engine_flow,
+                    workspace_step,
+                    rerun=request.rerun,
+                    observer=observer,
+                )
             finally:
                 if should_capture:
                     self._capture_flow_db(
@@ -312,6 +373,107 @@ class WorkspaceRuntimeApi:
             return result
 
         return self._with_session_mutation_lock(request.workspace_id, run_step)
+
+    def start_flow_operation(self, request: OperationStartFlowRequest) -> dict:
+        self._require_gui_operation_origin(request.origin)
+        self._get_session(request.workspace_id)
+        try:
+            return self.operations.start(
+                workspace_id=request.workspace_id,
+                kind="flow",
+                origin=request.origin,
+                rerun=request.rerun,
+                step="",
+                idempotency_key=request.idempotency_key,
+                runner=lambda observer: self._flow_run(
+                    FlowRunRequest(workspace_id=request.workspace_id, rerun=request.rerun),
+                    observer=observer,
+                    preserve_user_inputs=request.rerun,
+                ),
+            )
+        except RuntimeOperationConflict as exc:
+            raise RuntimeApiError("command_failed", str(exc)) from exc
+
+    def start_step_operation(self, request: OperationStartStepRequest) -> dict:
+        self._require_gui_operation_origin(request.origin)
+        self._get_session(request.workspace_id)
+        try:
+            return self.operations.start(
+                workspace_id=request.workspace_id,
+                kind="step",
+                origin=request.origin,
+                rerun=request.rerun,
+                step=request.step,
+                idempotency_key=request.idempotency_key,
+                runner=lambda observer: self._flow_run_step(
+                    FlowRunStepRequest(
+                        workspace_id=request.workspace_id,
+                        step=request.step,
+                        rerun=request.rerun,
+                    ),
+                    observer=observer,
+                    reset_dependents=request.reset_dependents,
+                ),
+            )
+        except RuntimeOperationConflict as exc:
+            raise RuntimeApiError("command_failed", str(exc)) from exc
+
+    def operation_status(self, request: OperationIdRequest) -> dict:
+        try:
+            return self.operations.operation_status(request.operation_id)
+        except KeyError as exc:
+            raise RuntimeApiError(
+                "invalid_request",
+                f"operation not found: {request.operation_id}",
+            ) from exc
+
+    def cancel_operation(self, request: OperationIdRequest) -> dict:
+        try:
+            return self.operations.request_cancel(request.operation_id)
+        except KeyError as exc:
+            raise RuntimeApiError(
+                "invalid_request",
+                f"operation not found: {request.operation_id}",
+            ) from exc
+
+    def acknowledge_step_rendered(self, request: OperationAckStepRenderedRequest) -> dict:
+        try:
+            return self.operations.acknowledge_step_rendered(
+                request.operation_id,
+                request.event_id,
+                request.step_commit_id,
+                request.workspace_revision,
+            )
+        except KeyError as exc:
+            raise RuntimeApiError(
+                "invalid_request",
+                f"operation not found: {request.operation_id}",
+            ) from exc
+
+    def workspace_snapshot(self, request: WorkspaceIdRequest) -> dict:
+        session = self._get_session(request.workspace_id)
+        flow_data = getattr(getattr(session.workspace, "flow", None), "data", {})
+        raw_steps = flow_data.get("steps", []) if isinstance(flow_data, dict) else []
+        steps = [
+            {
+                "name": str(step.get("name", "")),
+                "tool": str(step.get("tool", "")),
+                "state": str(step.get("state", "Unstart")),
+                "runtime": str(step.get("runtime", "")),
+                "peakMemory": step.get("peak memory (mb)", 0),
+            }
+            for step in raw_steps
+            if isinstance(step, dict)
+        ]
+        return {
+            **self.operations.workspace_snapshot(request.workspace_id),
+            "directory": str(session.directory),
+            "flow": {"steps": steps},
+            "home": stringify_paths(deepcopy(getattr(session.workspace.home, "data", {}))),
+            "parameters": stringify_paths(
+                deepcopy(getattr(session.workspace.parameters, "data", {}))
+            ),
+        }
 
     def db_ensure(self, request: DbEnsureRequest) -> dict:
         self._require_persistent_db()
@@ -624,6 +786,11 @@ class WorkspaceRuntimeApi:
         if not self.persistent_db_enabled:
             raise RuntimeApiError("command_failed", "persistent_db_disabled")
 
+    @staticmethod
+    def _require_gui_operation_origin(origin: str) -> None:
+        if origin != "gui":
+            raise RuntimeApiError("invalid_request", "operation origin must be gui")
+
     def _new_layout_edit_id(self) -> str:
         edit_session_id = f"layout-edit-{self._next_layout_edit_id}"
         self._next_layout_edit_id += 1
@@ -712,28 +879,113 @@ class WorkspaceRuntimeApi:
 
         data_api.refresh_workspace_config(workspace)
 
-    def _prepare_workspace_for_rerun(self, workspace, engine_flow) -> None:
+    def _prepare_workspace_for_rerun(
+        self,
+        workspace,
+        engine_flow,
+        *,
+        preserve_user_inputs: bool = False,
+    ) -> None:
         import chipcompiler.data as data_api
 
-        data_api.prepare_workspace_for_rerun(workspace, engine_flow)
+        data_api.prepare_workspace_for_rerun(
+            workspace,
+            engine_flow,
+            preserve_user_inputs=preserve_user_inputs,
+        )
+
+    @staticmethod
+    def _rerun_affected_steps(engine_flow, workspace_step, *, reset_dependents: bool):
+        if not reset_dependents:
+            return [workspace_step]
+        workspace_steps = list(getattr(engine_flow, "workspace_steps", []))
+        try:
+            start_index = workspace_steps.index(workspace_step)
+        except ValueError:
+            return [workspace_step]
+        return workspace_steps[start_index:]
+
+    @staticmethod
+    def _notify_rerun_prepared(
+        observer,
+        workspace_steps,
+        *,
+        scope: str,
+        target_step: str = "",
+    ) -> None:
+        callback = getattr(observer, "on_rerun_prepared", None)
+        if callback is None:
+            return
+        callback(
+            affected_steps=[str(getattr(step, "name", "")) for step in workspace_steps],
+            scope=scope,
+            target_step=target_step,
+        )
 
     @staticmethod
     def _prepare_step_for_rerun(workspace, engine_flow, workspace_step) -> None:
+        WorkspaceRuntimeApi._prepare_steps_for_rerun(
+            workspace,
+            engine_flow,
+            [workspace_step],
+        )
+
+    @staticmethod
+    def _prepare_steps_for_rerun(workspace, engine_flow, workspace_steps) -> None:
         workspace_root = Path(workspace.directory).resolve()
-        for directory in WorkspaceRuntimeApi._step_artifact_dirs(workspace_step):
+        unique_steps = []
+        known_step_keys = set()
+        for workspace_step in workspace_steps:
+            key = (
+                str(getattr(workspace_step, "name", "")),
+                str(getattr(workspace_step, "tool", "")),
+            )
+            if key in known_step_keys:
+                continue
+            known_step_keys.add(key)
+            unique_steps.append(workspace_step)
+
+        artifact_directories = []
+        known_directories = set()
+        for workspace_step in unique_steps:
+            for directory in WorkspaceRuntimeApi._step_artifact_dirs(workspace_step):
+                resolved = WorkspaceRuntimeApi._validate_step_artifact_dir(
+                    workspace_root,
+                    directory,
+                    workspace_step.name,
+                )
+                if resolved in known_directories:
+                    continue
+                known_directories.add(resolved)
+                artifact_directories.append((workspace_step.name, directory))
+
+        for step_name, directory in artifact_directories:
             WorkspaceRuntimeApi._clear_step_artifact_dir(
                 workspace_root,
                 directory,
-                workspace_step.name,
+                step_name,
             )
 
-        record = engine_flow.get_step(workspace_step.name, workspace_step.tool)
-        if record is not None:
-            record.update({"state": "Unstart", "runtime": "", "peak memory (mb)": 0})
+        updated_record = False
+        for workspace_step in unique_steps:
+            record = engine_flow.get_step(workspace_step.name, workspace_step.tool)
+            if record is None:
+                continue
+            record.update(
+                {
+                    "state": "Unstart",
+                    "runtime": "",
+                    "peak memory (mb)": 0,
+                    "info": {},
+                }
+            )
+            updated_record = True
+        if updated_record:
             engine_flow.save()
 
-        WorkspaceRuntimeApi._reset_step_subflow(workspace_step)
-        WorkspaceRuntimeApi._reset_step_checklist(workspace_step)
+        for workspace_step in unique_steps:
+            WorkspaceRuntimeApi._reset_step_subflow(workspace_step)
+            WorkspaceRuntimeApi._reset_step_checklist(workspace_step)
 
     @staticmethod
     def _reset_step_subflow(workspace_step) -> None:
@@ -764,14 +1016,14 @@ class WorkspaceRuntimeApi:
 
     @staticmethod
     def _reset_step_checklist(workspace_step) -> None:
-        from chipcompiler.utility import json_write
+        from chipcompiler.data import Checklist
 
         checklist = getattr(workspace_step, "checklist", None)
         path = getattr(checklist, "path", None)
         if not path:
             return
         checklist_path = Path(path)
-        json_write(checklist_path, {"path": str(checklist_path), "checklist": []})
+        Checklist(checklist_path).replace([])
         checklist.checklist = []
 
     @staticmethod
@@ -790,6 +1042,22 @@ class WorkspaceRuntimeApi:
         directory: Path,
         step_name: str,
     ) -> None:
+        WorkspaceRuntimeApi._validate_step_artifact_dir(workspace_root, directory, step_name)
+        if directory.exists():
+            if not directory.is_dir():
+                raise RuntimeApiError(
+                    "command_failed",
+                    f"step artifact is not a directory: {step_name}",
+                )
+            shutil.rmtree(directory)
+        directory.mkdir(parents=True, exist_ok=True)
+
+    @staticmethod
+    def _validate_step_artifact_dir(
+        workspace_root: Path,
+        directory: Path,
+        step_name: str,
+    ) -> Path:
         resolved = directory.resolve()
         if (
             resolved == workspace_root
@@ -800,14 +1068,12 @@ class WorkspaceRuntimeApi:
                 "command_failed",
                 f"step artifact escapes workspace: {step_name}",
             )
-        if directory.exists():
-            if not directory.is_dir():
-                raise RuntimeApiError(
-                    "command_failed",
-                    f"step artifact is not a directory: {step_name}",
-                )
-            shutil.rmtree(directory)
-        directory.mkdir(parents=True, exist_ok=True)
+        if directory.exists() and not directory.is_dir():
+            raise RuntimeApiError(
+                "command_failed",
+                f"step artifact is not a directory: {step_name}",
+            )
+        return resolved
 
 
 def _layout_edit_begin_result(edit_session: LayoutEditSession, *, reused: bool) -> dict:
@@ -1911,3 +2177,28 @@ def _success_state():
 
 def _state_value(state: Any) -> str:
     return getattr(state, "value", str(state))
+
+
+def _run_engine_flow_steps(engine_flow, *, rerun: bool, observer) -> bool:
+    run_steps = engine_flow.run_steps
+    if observer is not None and _callable_accepts_keyword(run_steps, "observer"):
+        return run_steps(rerun=rerun, observer=observer)
+    return run_steps(rerun=rerun)
+
+
+def _run_engine_flow_step(engine_flow, workspace_step, *, rerun: bool, observer):
+    run_step = engine_flow.run_step
+    if observer is not None and _callable_accepts_keyword(run_step, "observer"):
+        return run_step(workspace_step, rerun=rerun, observer=observer)
+    return run_step(workspace_step, rerun=rerun)
+
+
+def _callable_accepts_keyword(callback, keyword: str) -> bool:
+    try:
+        parameters = inspect.signature(callback).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    return any(
+        parameter.name == keyword or parameter.kind == inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters
+    )
