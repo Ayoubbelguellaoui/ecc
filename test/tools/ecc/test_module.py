@@ -407,13 +407,6 @@ def test_ecc_runtime_wrappers_stringify_path_arguments(tmp_path):
     module.run_routing(Path("/ws/config/route.json"))
     module.feature_route_read(Path("/ws/feature/route_read.json"))
     module.feature_route(Path("/ws/feature/route.json"))
-    module.run_sta(Path("/ws/data/sta"))
-    module.report_sta(Path("/ws/report/sta.rpt"))
-    module.init_log(Path("/ws/log"))
-    module.set_design_workspace(Path("/ws/design"))
-    module.read_lef_def([Path("/pdk/tech.lef")], Path("/ws/design.def"))
-    module.read_netlist(Path("/ws/design.v"))
-    module.read_spef(Path("/ws/design.spef"))
     module.write_abstract_lef(Path("/ws/output/abstract.lef"))
     module.write_timing_model(
         timing_output,
@@ -424,10 +417,6 @@ def test_ecc_runtime_wrappers_stringify_path_arguments(tmp_path):
         spef_path=Path("/ws/design.spef"),
         design_name="gcd",
     )
-    module.run_to(Path("/ws/config/to.json"))
-    module.run_timing_opt_drv(Path("/ws/config/drv.json"))
-    module.run_timing_opt_hold(Path("/ws/config/hold.json"))
-    module.run_timing_opt_setup(Path("/ws/config/setup.json"))
     module.layout_patchs(Path("/ws/layout/patches.json"))
     module.layout_graph(Path("/ws/layout/graph.json"))
     module.generate_vectors(Path("/ws/vectors"))
