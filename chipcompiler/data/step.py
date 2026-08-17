@@ -23,6 +23,7 @@ class StepEnum(Enum):
     SIGNOFF = "Signoff"
     STA = "sta"
     DRC = "drc"
+    LVS = "lvs"
     RCX = "RCX"
     ABSTRACT_LEF = "Abstract lef"
     HARDEN = "Harden"

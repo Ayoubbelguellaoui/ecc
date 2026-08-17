@@ -222,13 +222,17 @@ class ECCToolsModule:
         """init_lef"""
         self.ecc.lef_init(lef_paths=path_texts(lef_paths))
 
-    def read_def(self, path: str = ""):
+    def read_def(self, path: str = "") -> bool:
         """init def"""
-        self.ecc.def_init(def_path=path_text(path))
+        return self.ecc.def_init(def_path=path_text(path))
 
     def read_verilog(self, verilog: PathArg, top_module: str):
         """init verilog"""
         self.ecc.verilog_init(path_text(verilog), top_module)
+
+    def read_lvs_verilog(self, verilog: PathArg, top_module: str) -> bool:
+        """init verilog for iLVS"""
+        return self.ecc.lvs_verilog_init(path_text(verilog), top_module)
 
     def def_save(self, def_path: PathArg):
         """save def file"""
@@ -492,6 +496,21 @@ class ECCToolsModule:
         generate drc result
         """
         self.ecc.save_drc(path=path_text(feature_path))
+
+    ########################################################################
+    # LVS api
+    ########################################################################
+    def init_lvs(self, output_dir: PathArg, thread_number: int = 128):
+        return self.ecc.init_lvs(
+            temp_directory_path=path_text(output_dir),
+            thread_number=thread_number,
+        )
+
+    def run_lvs(self):
+        return self.ecc.run_lvs()
+
+    def destroy_lvs(self):
+        return self.ecc.destroy_lvs()
 
     ########################################################################
     # floorplan api

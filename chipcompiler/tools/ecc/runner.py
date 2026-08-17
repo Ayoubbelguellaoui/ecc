@@ -105,6 +105,26 @@ def copy_rcx_spef_outputs(workspace: Workspace, step: EccStep):
         step.output.spef[:] = output_paths
 
 
+def copy_lvs_outputs(workspace: Workspace, step: EccStep):
+    output_dir_text = os.fspath((step.data.steps or {}).get(StepEnum.LVS.value, ""))
+    if not output_dir_text:
+        return
+
+    reporter_dir = Path(output_dir_text) / "lvs_reporter"
+    if not reporter_dir.is_dir():
+        return
+
+    for source_path, target_path in (
+        (reporter_dir / "ilvs.rpt", Path(step.report.step or "")),
+        (reporter_dir / "ilvs.json", Path(step.feature.step or "")),
+    ):
+        if not source_path.is_file():
+            continue
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source_path, target_path)
+        workspace.logger.info("Copied LVS %s to %s", source_path, target_path)
+
+
 def collect_sta_signoff_items(workspace: Workspace) -> list[dict]:
     workspace_dir = workspace.directory
     sta_config = _workspace_sta_config_path(workspace)
@@ -146,24 +166,24 @@ def collect_sta_signoff_items(workspace: Workspace) -> list[dict]:
     return items
 
 
+def _existing_input_path(path: Path | None) -> str | None:
+    if not path:
+        return None
+
+    path_text = os.fspath(path)
+    gzip_path = path_text if path_text.endswith(".gz") else f"{path_text}.gz"
+    plain_path = path_text[:-3] if path_text.endswith(".gz") else path_text
+
+    if os.path.exists(gzip_path):
+        return gzip_path
+    if os.path.exists(plain_path):
+        return plain_path
+
+    return None
+
+
 def create_db_engine(workspace: Workspace, step: WorkspaceStep) -> ECCToolsModule:
     """"""
-
-    def input_path_exists(path: Path | None) -> str | None:
-        if not path:
-            return None
-
-        path = os.fspath(path)
-
-        gzip_path = path if path.endswith(".gz") else f"{path}.gz"
-        plain_path = path[:-3] if path.endswith(".gz") else path
-
-        if os.path.exists(gzip_path):
-            return gzip_path
-        if os.path.exists(plain_path):
-            return plain_path
-
-        return None
 
     def load_data():
         ecc_module = ECCToolsModule()
@@ -198,10 +218,10 @@ def create_db_engine(workspace: Workspace, step: WorkspaceStep) -> ECCToolsModul
 
     def load_design():
         def def_exist() -> str | None:
-            return input_path_exists(step.input.def_)
+            return _existing_input_path(step.input.def_)
 
         def verilog_exist() -> str | None:
-            return input_path_exists(step.input.verilog)
+            return _existing_input_path(step.input.verilog)
 
         ecc_module = ECCToolsModule()
 
@@ -217,18 +237,20 @@ def create_db_engine(workspace: Workspace, step: WorkspaceStep) -> ECCToolsModul
 
         # if db def exist, read db def
         def_path = def_exist()
+        verilog_path = verilog_exist()
 
-        if def_path is not None:
-            ecc_module.read_def(def_path)
-        else:
-            # else, read step output verilog
-            verilog_path = verilog_exist()
-            if verilog_path:
-                ecc_module.read_verilog(
-                    verilog=verilog_path, top_module=workspace.design.top_module
-                )
-            else:
+        if step.name == StepEnum.LVS.value:
+            if def_path is None:
                 return None
+            if not ecc_module.read_def(def_path):
+                return None
+        elif def_path is not None:
+            ecc_module.read_def(def_path)
+        elif verilog_path:
+            # else, read step output verilog
+            ecc_module.read_verilog(verilog=verilog_path, top_module=workspace.design.top_module)
+        else:
+            return None
 
         return ecc_module
 
@@ -238,14 +260,14 @@ def create_db_engine(workspace: Workspace, step: WorkspaceStep) -> ECCToolsModul
             return False
 
         return (
-            input_path_exists(step.input.def_) is not None
-            or input_path_exists(step.input.verilog) is not None
+            _existing_input_path(step.input.def_) is not None
+            or _existing_input_path(step.input.verilog) is not None
         )
 
     if not is_eda_exist() or not is_enable_setup():
         return None
     try:
-        ecc_module = load_data()
+        ecc_module = None if step.name == StepEnum.LVS.value else load_data()
         if ecc_module is None:
             ecc_module = load_design()
     except Exception as e:
@@ -475,6 +497,8 @@ def run_step(workspace: Workspace, step: EccStep, ecc_module: ECCToolsModule | N
             state = run_routing(workspace=workspace, step=step, ecc_module=ecc_module)
         case StepEnum.DRC.value:
             state = run_drc(workspace=workspace, step=step, ecc_module=ecc_module)
+        case StepEnum.LVS.value:
+            state = run_lvs(workspace=workspace, step=step, ecc_module=ecc_module)
         case StepEnum.FILLER.value:
             state = run_filler(workspace=workspace, step=step, ecc_module=ecc_module)
         case StepEnum.HARDEN.value:
@@ -672,6 +696,52 @@ def run_drc(workspace: Workspace, step: EccStep, ecc_module: ECCToolsModule | No
         )
 
         ecc_module.save_drc(feature_path=step.feature.step or "")
+
+        sub_flow.update_step(step_name=EccSubFlowEnum.save_data.value, state=StateEnum.Success)
+
+        run_analysis(workspace=workspace, step=step, subflow=sub_flow)
+
+    return reslut
+
+
+def run_lvs(workspace: Workspace, step: EccStep, ecc_module: ECCToolsModule | None = None) -> bool:
+    """
+    run chip lvs
+    """
+    reslut = False
+
+    sub_flow = EccSubFlow(workspace=workspace, workspace_step=step)
+
+    ecc_module = get_eda_instance(workspace=workspace, step=step, ecc_module=ecc_module)
+
+    if ecc_module is not None:
+        verilog_path = _existing_input_path(step.input.verilog)
+        if verilog_path is None:
+            workspace.logger.error("LVS netlist input does not exist: %s", step.input.verilog)
+            return False
+        if not ecc_module.read_lvs_verilog(verilog_path, workspace.design.top_module):
+            workspace.logger.error("Failed to load LVS netlist: %s", verilog_path)
+            return False
+
+        sub_flow.update_step(step_name=EccSubFlowEnum.load_data.value, state=StateEnum.Success)
+
+        ecc_module.init_lvs(output_dir=(step.data.steps or {}).get(StepEnum.LVS.value, ""))
+        ecc_module.run_lvs()
+        ecc_module.destroy_lvs()
+
+        sub_flow.update_step(step_name=EccSubFlowEnum.run_LVS.value, state=StateEnum.Success)
+
+        reslut = save_data(
+            workspace=workspace,
+            step=step,
+            ecc_module=ecc_module,
+            feature_step=False,
+            report_timing=False,
+        )
+        if not reslut:
+            return False
+
+        copy_lvs_outputs(workspace=workspace, step=step)
 
         sub_flow.update_step(step_name=EccSubFlowEnum.save_data.value, state=StateEnum.Success)
 

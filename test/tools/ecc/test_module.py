@@ -14,6 +14,7 @@ from chipcompiler.tools.ecc.metrics import (
     build_metrics_cts,
     build_metrics_drc,
     build_metrics_legalization,
+    build_metrics_lvs,
     build_metrics_net_opt,
     build_metrics_placement,
     build_metrics_routing,
@@ -365,8 +366,9 @@ def test_ecc_runtime_wrappers_stringify_path_arguments(tmp_path):
     timing_output = tmp_path / "output" / "gcd.lib"
     timing_work_dir = tmp_path / "sta"
 
-    module.read_def(Path("/ws/input.def"))
+    assert module.read_def(Path("/ws/input.def")) is True
     module.read_verilog(Path("/ws/input.v"), "gcd")
+    assert module.read_lvs_verilog(Path("/ws/input_lvs.v"), "gcd") is True
     module.def_save(Path("/ws/output/gcd.def.gz"))
     module.gds_save(Path("/ws/output/gcd.gds.gz"), is_harden=True)
     module.tcl_save(Path("/ws/script/out.tcl"))
@@ -417,6 +419,9 @@ def test_ecc_runtime_wrappers_stringify_path_arguments(tmp_path):
         spef_path=Path("/ws/design.spef"),
         design_name="gcd",
     )
+    module.init_lvs(Path("/ws/data/lvs"))
+    module.run_lvs()
+    module.destroy_lvs()
     module.layout_patchs(Path("/ws/layout/patches.json"))
     module.layout_graph(Path("/ws/layout/graph.json"))
     module.generate_vectors(Path("/ws/vectors"))
@@ -452,6 +457,61 @@ def test_ecc_runtime_wrappers_stringify_path_arguments(tmp_path):
             "destroy_sta",
         }
     ] == ["lib_init", "sdc_init", "spef_init", "init_sta", "extract_lib", "destroy_sta"]
+
+
+def test_ecc_metrics_qor_summary_marks_blocking_lvs_violations(tmp_path):
+    workspace = Workspace(
+        directory=tmp_path,
+        design=OriginDesign(name="gcd", top_module="gcd"),
+    )
+    step = build_step(
+        workspace=workspace,
+        step_name=StepEnum.LVS.value,
+        input_def=tmp_path / "input.def",
+        input_verilog=tmp_path / "input.v",
+    )
+    build_step_space(step)
+    assert step.feature.step is not None
+    step.feature.step.write_text(
+        json.dumps({"violations": [{"id": 1}, {"id": 2}]}),
+        encoding="utf-8",
+    )
+
+    metrics = build_metrics_lvs(workspace, step)
+
+    assert metrics is not None
+    assert metrics.data["lvs_count"] == 2
+    assert step.analysis.qor_summary is not None
+    summary = json.loads(step.analysis.qor_summary.read_text(encoding="utf-8"))
+    assert summary["quality_status"] == "blocked"
+    assert summary["gates"] == [
+        {
+            "id": "qor.lvs.clean",
+            "title": "Final LVS clean",
+            "state": "failed",
+            "blocking": True,
+            "metrics": [
+                {
+                    "id": "lvs_count",
+                    "actual": 2,
+                    "operator": "==",
+                    "expected": 0,
+                    "source": {
+                        "kind": "feature",
+                        "path": "feature/lvs.step.json",
+                        "selector": "/violations",
+                    },
+                }
+            ],
+            "evidence": [
+                {
+                    "kind": "feature",
+                    "path": "feature/lvs.step.json",
+                    "selector": "/violations",
+                }
+            ],
+        }
+    ]
 
 
 def test_ecc_metrics_accept_path_feature_paths(tmp_path):
