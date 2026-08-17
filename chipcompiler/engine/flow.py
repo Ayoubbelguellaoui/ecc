@@ -488,6 +488,31 @@ class EngineFlow:
 
         return True
 
+    def _normalize_legacy_terminal_state(self, workspace_step, step_tag):
+        """Reset terminal states from pre-guard workspaces to Unstart.
+
+        Pre-guard workspaces may have steps stuck in Incomplete/Invalid from
+        crashed runs.  Batch resets (_invalidate_suffix, clear_states) handle
+        rerun paths; this handles the rerun=False resume path.
+        """
+        old_step = self.get_step(name=workspace_step.name, tool=workspace_step.tool)
+        if old_step is None:
+            return
+        persisted = old_step.get("state")
+        if persisted in {
+            StateEnum.Imcomplete.value,
+            StateEnum.Invalid.value,
+        }:
+            logger.warning(
+                "Normalizing legacy %s state '%s' → Unstart before rerun",
+                step_tag,
+                persisted,
+            )
+            old_step["state"] = StateEnum.Unstart.value
+            old_step["runtime"] = ""
+            old_step["peak memory (mb)"] = 0
+            # No self.save() — set_state(Ongoing) below saves.
+
     def run_step(
         self,
         workspace_step: WorkspaceStep | str,
@@ -512,6 +537,8 @@ class EngineFlow:
             self.clear_db_engine_after_step(workspace_step, StateEnum.Success)
             _notify_flow_observer(observer, "on_step_skipped", workspace_step)
             return StateEnum.Success
+
+        self._normalize_legacy_terminal_state(workspace_step, step_tag)
 
         # set state ongoing
         start_time = time.time()

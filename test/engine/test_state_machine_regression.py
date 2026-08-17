@@ -6,12 +6,15 @@ bypass guards, and idempotency/staleness invariants hold.
 """
 
 import json
+import logging
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-from chipcompiler.data import OriginDesign, StateEnum, Workspace
+from chipcompiler import tools
+from chipcompiler.data import EccOutput, EccStep, OriginDesign, StateEnum, Workspace
 from chipcompiler.data.workspace import Flow
 from chipcompiler.engine.flow import _VALID_TRANSITIONS, EngineFlow
 from chipcompiler.utility import Logger
@@ -290,3 +293,141 @@ class TestTransitionTableCompleteness:
         """No state transitions to itself (except implicitly via idempotency)."""
         for src, targets in _VALID_TRANSITIONS.items():
             assert src not in targets, f"{src} should not transition to itself"
+
+
+# ---------------------------------------------------------------------------
+# Legacy state normalization tests (Phase 3a)
+# ---------------------------------------------------------------------------
+
+
+def _make_resume_workspace(tmp_path, steps):
+    """Create workspace + EngineFlow with persisted flow.json and aligned workspace_steps."""
+    home = tmp_path / "home"
+    home.mkdir()
+    workspace = Workspace(directory=tmp_path, flow=Flow(path=home / "flow.json"))
+    engine_flow = EngineFlow(workspace)
+    engine_flow.workspace.flow.data = {
+        "steps": [
+            {
+                "name": name,
+                "tool": "ecc",
+                "state": state,
+                "runtime": "",
+                "peak memory (mb)": 0,
+                "info": {},
+            }
+            for name, state in steps
+        ]
+    }
+    engine_flow.save()
+    engine_flow.workspace_steps = []
+    engine_flow.engine_db = SimpleNamespace(engine=None)
+    for name, _ in steps:
+        directory = tmp_path / f"{name}_ecc"
+        directory.mkdir(exist_ok=True)
+        engine_flow.workspace_steps.append(
+            EccStep(
+                name=name,
+                tool="ecc",
+                directory=directory,
+                output=EccOutput(verilog=directory / "design.v"),
+            )
+        )
+    return engine_flow
+
+
+class TestLegacyStateNormalization:
+    """run_step() normalizes terminal states before set_state(Ongoing)."""
+
+    def test_incomplete_step_normalized_on_resume(self, tmp_path, monkeypatch):
+        """Legacy workspace with Incomplete step — resume normalizes it."""
+        flow = _make_resume_workspace(
+            tmp_path,
+            [("Synthesis", "Success"), ("Floorplan", "Incomplete")],
+        )
+        monkeypatch.setattr(tools, "run_step", lambda **_kw: True)
+        monkeypatch.setattr(flow, "check_step_result", lambda **_kw: True)
+
+        # This must NOT raise ValueError
+        result = flow.run_step(flow.workspace_steps[1], rerun=False)
+        assert result == StateEnum.Success
+
+        # Verify persisted state is Success (not Incomplete)
+        persisted = json.loads((tmp_path / "home" / "flow.json").read_text())
+        assert persisted["steps"][1]["state"] == StateEnum.Success.value
+
+    def test_invalid_step_normalized_on_resume(self, tmp_path, monkeypatch):
+        """Legacy workspace with Invalid step — resume normalizes it."""
+        flow = _make_resume_workspace(
+            tmp_path,
+            [("Synthesis", "Success"), ("Floorplan", "Invalid")],
+        )
+        monkeypatch.setattr(tools, "run_step", lambda **_kw: True)
+        monkeypatch.setattr(flow, "check_step_result", lambda **_kw: True)
+
+        result = flow.run_step(flow.workspace_steps[1], rerun=False)
+        assert result == StateEnum.Success
+
+        persisted = json.loads((tmp_path / "home" / "flow.json").read_text())
+        assert persisted["steps"][1]["state"] == StateEnum.Success.value
+
+    def test_ongoing_step_not_normalized(self, tmp_path, monkeypatch):
+        """Ongoing step is NOT a terminal state — no normalization needed."""
+        flow = _make_resume_workspace(
+            tmp_path,
+            [("Synthesis", "Success"), ("Floorplan", "Ongoing")],
+        )
+        monkeypatch.setattr(tools, "run_step", lambda **_kw: True)
+        monkeypatch.setattr(flow, "check_step_result", lambda **_kw: True)
+
+        # Ongoing → Ongoing is idempotent, should work
+        result = flow.run_step(flow.workspace_steps[1], rerun=False)
+        assert result == StateEnum.Success
+
+    def test_unstart_step_not_affected(self, tmp_path, monkeypatch):
+        """Normal Unstart step — no normalization, normal lifecycle."""
+        flow = _make_resume_workspace(
+            tmp_path,
+            [("Synthesis", "Success"), ("Floorplan", "Unstart")],
+        )
+        monkeypatch.setattr(tools, "run_step", lambda **_kw: True)
+        monkeypatch.setattr(flow, "check_step_result", lambda **_kw: True)
+
+        result = flow.run_step(flow.workspace_steps[1], rerun=False)
+        assert result == StateEnum.Success
+
+    def test_normalization_emits_warning(self, tmp_path, monkeypatch, caplog):
+        """Normalization logs a warning so the legacy state is not silently lost."""
+        flow = _make_resume_workspace(
+            tmp_path,
+            [("Synthesis", "Success"), ("Floorplan", "Incomplete")],
+        )
+        monkeypatch.setattr(tools, "run_step", lambda **_kw: True)
+        monkeypatch.setattr(flow, "check_step_result", lambda **_kw: True)
+
+        with caplog.at_level(logging.WARNING):
+            flow.run_step(flow.workspace_steps[1], rerun=False)
+        assert "Normalizing legacy" in caplog.text
+        assert "Incomplete" in caplog.text
+
+    def test_agent_incomplete_step_normalized_on_resume(self, tmp_path, monkeypatch):
+        """AgentEngineFlow: legacy Incomplete step resumes without ValueError."""
+        import agent.engine as agent_engine
+
+        flow = _make_resume_workspace(
+            tmp_path,
+            [("Synthesis", "Success"), ("Floorplan", "Incomplete")],
+        )
+        agent_flow = agent_engine.AgentEngineFlow.__new__(agent_engine.AgentEngineFlow)
+        agent_flow.workspace = flow.workspace
+        agent_flow.workspace_steps = flow.workspace_steps
+        agent_flow.engine_db = flow.engine_db
+
+        monkeypatch.setattr(agent_engine, "run_agent_step", lambda **_kw: True)
+        monkeypatch.setattr(agent_flow, "check_step_result", lambda **_kw: True)
+
+        result = agent_flow.run_step(agent_flow.workspace_steps[1], rerun=False)
+        assert result == StateEnum.Success
+
+        persisted = json.loads((tmp_path / "home" / "flow.json").read_text())
+        assert persisted["steps"][1]["state"] == StateEnum.Success.value
