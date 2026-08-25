@@ -8,7 +8,6 @@ from an existing workspace; execution itself stays in ``EngineFlow.run_step``.
 """
 
 import logging
-import os
 import shutil
 from pathlib import Path
 from typing import TYPE_CHECKING, NamedTuple
