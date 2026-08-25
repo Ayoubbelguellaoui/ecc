@@ -72,21 +72,79 @@ def flush_cstdio() -> None:
         ctypes.CDLL(None).fflush(None)
 
 
-def redirect_stdio_to_file(log_file: str) -> TextIO:
+class _StdioRedirect:
+    def __init__(self, log_file: str, *, acquire_lock: bool = True):
+        self.log_file = log_file
+        self._acquire_lock = acquire_lock
+        self._lock_acquired = False
+        self._saved_fds: tuple[int, int] | None = None
+        self._saved_streams: tuple[TextIO, TextIO] | None = None
+        self._log_stream: TextIO | None = None
+
+    def __enter__(self) -> "_StdioRedirect":
+        if self._acquire_lock:
+            stdio_redirect_lock.acquire()
+            self._lock_acquired = True
+        try:
+            self._saved_fds = (os.dup(1), os.dup(2))
+            self._saved_streams = (sys.stdout, sys.stderr)
+            self._log_stream = open(self.log_file, "a", encoding="utf-8", buffering=1)
+            for stream in (sys.stdout, sys.stderr):
+                with suppress(Exception):
+                    stream.flush()
+            flush_cstdio()
+            os.dup2(self._log_stream.fileno(), 1)
+            os.dup2(self._log_stream.fileno(), 2)
+            sys.stdout = os.fdopen(1, "w", encoding="utf-8", buffering=1, closefd=False)
+            sys.stderr = os.fdopen(2, "w", encoding="utf-8", buffering=1, closefd=False)
+            return self
+        except BaseException:
+            self._restore()
+            if self._lock_acquired:
+                stdio_redirect_lock.release()
+                self._lock_acquired = False
+            raise
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        try:
+            self._restore()
+        finally:
+            if self._lock_acquired:
+                stdio_redirect_lock.release()
+                self._lock_acquired = False
+
+    def close(self) -> None:
+        self.__exit__(None, None, None)
+
+    def flush(self) -> None:
+        if self._log_stream is not None:
+            self._log_stream.flush()
+
+    def _restore(self) -> None:
+        if self._saved_fds is None:
+            return
+        for stream in (sys.stdout, sys.stderr):
+            with suppress(Exception):
+                stream.flush()
+        flush_cstdio()
+        os.dup2(self._saved_fds[0], 1)
+        os.dup2(self._saved_fds[1], 2)
+        os.close(self._saved_fds[0])
+        os.close(self._saved_fds[1])
+        if self._saved_streams is not None:
+            sys.stdout, sys.stderr = self._saved_streams
+        if self._log_stream is not None:
+            self._log_stream.close()
+        self._saved_fds = None
+        self._saved_streams = None
+        self._log_stream = None
+
+
+def redirect_stdio_to_file(log_file: str) -> _StdioRedirect:
     """Redirect process stdout/stderr to log_file at file-descriptor level."""
-    # The stream intentionally stays open: its fd is dup2'd onto stdout/stderr below.
-    log_stream = open(log_file, "a", encoding="utf-8", buffering=1)  # noqa: SIM115
-
-    for stream in (sys.stdout, sys.stderr):
-        with suppress(Exception):
-            stream.flush()
-    flush_cstdio()
-
-    os.dup2(log_stream.fileno(), 1)
-    os.dup2(log_stream.fileno(), 2)
-    sys.stdout = os.fdopen(1, "w", encoding="utf-8", buffering=1, closefd=False)
-    sys.stderr = os.fdopen(2, "w", encoding="utf-8", buffering=1, closefd=False)
-    return log_stream
+    redirect = _StdioRedirect(log_file)
+    redirect.__enter__()
+    return redirect
 
 
 @contextmanager
@@ -96,25 +154,8 @@ def capture_stdio_to_file(log_file: str | None):
         yield
         return
 
-    with stdio_redirect_lock:
-        saved_fds = (os.dup(1), os.dup(2))
-        saved_streams = (sys.stdout, sys.stderr)
-        log_stream = None
-        try:
-            log_stream = redirect_stdio_to_file(log_file)
-            yield
-        finally:
-            for stream in (sys.stdout, sys.stderr):
-                with suppress(Exception):
-                    stream.flush()
-            flush_cstdio()
-            os.dup2(saved_fds[0], 1)
-            os.dup2(saved_fds[1], 2)
-            os.close(saved_fds[0])
-            os.close(saved_fds[1])
-            sys.stdout, sys.stderr = saved_streams
-            if log_stream is not None:
-                log_stream.close()
+    with _StdioRedirect(log_file):
+        yield
 
 
 def init_api_runtime_log(
@@ -126,7 +167,7 @@ def init_api_runtime_log(
     resolved = os.path.abspath(os.path.expanduser(log_file))
     os.makedirs(os.path.dirname(resolved) or ".", exist_ok=True)
     rotate_log_on_start(resolved, max_bytes, backup_count)
-    redirect_stdio_to_file(resolved)
+    _StdioRedirect(resolved, acquire_lock=False).__enter__()
     return resolved
 
 

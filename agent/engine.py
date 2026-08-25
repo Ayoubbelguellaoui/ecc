@@ -6,7 +6,7 @@ from threading import Event, Thread
 from chipcompiler.data import StateEnum, WorkspaceStep
 from chipcompiler.engine.flow import EngineFlow
 from chipcompiler.engine.step_execution import get_process_rss_mb, track_current_process_memory
-from chipcompiler.utility.log import redirect_stdio_to_file
+from chipcompiler.utility.log import capture_stdio_to_file
 
 from .tools import run_step as run_agent_step
 
@@ -39,14 +39,14 @@ class AgentEngineFlow(EngineFlow):
         start_time = time.time()
         timing_constraints = self.timing_constraint_facts()
         self.set_state(name=workspace_step.name, tool=workspace_step.tool, state=StateEnum.Ongoing)
-        self._redirect_step_stdio(workspace_step)
         start_memory, peak_memory, stop_monitor, monitor = self._start_memory_monitor()
         result = False
         try:
-            result = run_agent_step(
-                workspace=self.workspace, step=workspace_step, ecc_module=self.engine_db.engine
-            )
-            self.workspace.logger.info("[STEP] %s finished result=%s", step_tag, result)
+            with capture_stdio_to_file(workspace_step.log.file or ""):
+                result = run_agent_step(
+                    workspace=self.workspace, step=workspace_step, ecc_module=self.engine_db.engine
+                )
+                self.workspace.logger.info("[STEP] %s finished result=%s", step_tag, result)
         except Exception:
             self.workspace.logger.error("[STEP] %s failed with exception", step_tag)
             traceback.print_exc()
@@ -63,17 +63,6 @@ class AgentEngineFlow(EngineFlow):
             max(0, round(peak_memory[0] - start_memory, 3)),
         )
         return state
-
-    def _redirect_step_stdio(self, workspace_step: WorkspaceStep) -> None:
-        log_file = workspace_step.log.file or ""
-        if not log_file:
-            return
-        try:
-            log_file = os.path.abspath(log_file)
-            os.makedirs(os.path.dirname(log_file) or ".", exist_ok=True)
-            redirect_stdio_to_file(log_file)
-        except Exception:
-            traceback.print_exc()
 
     def _start_memory_monitor(self) -> tuple[float, list[float], Event, Thread]:
         start_memory = get_process_rss_mb(os.getpid())

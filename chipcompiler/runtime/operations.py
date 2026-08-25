@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from collections.abc import Callable
@@ -15,6 +16,7 @@ _RENDER_ACK_RETRY_SECONDS = 5.0
 _RENDER_ACK_PAUSE_SECONDS = 30.0
 _RENDER_ACK_ABORT_SECONDS = 300.0
 _TERMINAL_OPERATION_STATES = frozenset({"succeeded", "failed", "cancelled"})
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -336,10 +338,9 @@ class RuntimeOperationManager:
                 self._stop_step_log_tail(operation_id)
             finally:
                 with self._lock:
-                    self._active_by_workspace.pop(
-                        self._operations[operation_id].workspace_id,
-                        None,
-                    )
+                    workspace_id = self._operations[operation_id].workspace_id
+                    if self._active_by_workspace.get(workspace_id) == operation_id:
+                        self._active_by_workspace.pop(workspace_id, None)
 
     def step_started(self, operation_id: str, workspace_step: Any) -> None:
         self._stop_step_log_tail(operation_id)
@@ -675,7 +676,10 @@ class RuntimeOperationManager:
     def _publish(self, event: dict[str, Any]) -> None:
         publisher = self._publisher
         if publisher is not None:
-            publisher(event)
+            try:
+                publisher(event)
+            except Exception:
+                logger.exception("Runtime event publisher failed for %s", event.get("type"))
 
 
 class RuntimeFlowObserver:

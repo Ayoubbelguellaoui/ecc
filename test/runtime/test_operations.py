@@ -500,6 +500,41 @@ def test_cancel_does_not_replace_a_specific_tool_error(tmp_path):
     }
 
 
+def test_publisher_failure_does_not_prevent_operation_cleanup():
+    published = []
+
+    def publisher(event):
+        published.append(event["type"])
+        raise RuntimeError("event sink unavailable")
+
+    manager = RuntimeOperationManager(publisher)
+    started = manager.start(
+        workspace_id="workspace-1",
+        kind="flow",
+        origin="gui",
+        rerun=False,
+        step="",
+        idempotency_key="publisher-failure-1",
+        runner=lambda _observer: {"ok": True},
+    )
+
+    status = _wait_for_terminal(manager, started["operationId"])
+    assert status["state"] == "succeeded"
+    assert manager.shutdown_barrier() is None
+
+    retried = manager.start(
+        workspace_id="workspace-1",
+        kind="flow",
+        origin="gui",
+        rerun=False,
+        step="",
+        idempotency_key="publisher-failure-2",
+        runner=lambda _observer: {"retry": True},
+    )
+    assert _wait_for_terminal(manager, retried["operationId"])["state"] == "succeeded"
+    assert "operation.queued" in published
+
+
 def _wait_for_event(events: list[dict], event_type: str) -> dict:
     for _ in range(200):
         for event in events:
