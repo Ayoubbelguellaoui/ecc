@@ -155,7 +155,7 @@ class TestJsonWriteFailureLogging:
 class TestFlowSetStatePersistence:
     """Tests for EngineFlow.set_state json_write failure handling."""
 
-    def test_set_state_updates_in_memory_when_save_fails(self, tmp_path, monkeypatch):
+    def test_set_state_rolls_back_when_save_fails(self, tmp_path, monkeypatch):
         from chipcompiler.data import StateEnum
         from chipcompiler.engine.flow import EngineFlow
 
@@ -190,11 +190,9 @@ class TestFlowSetStatePersistence:
 
         monkeypatch.setattr("chipcompiler.utility.json_write", lambda *a, **kw: False)
 
-        flow.set_state("SYNTHESIS", "yosys", StateEnum.Ongoing)
-        result = flow.set_state("SYNTHESIS", "yosys", StateEnum.Success)
-        assert result is True
-        # In-memory state is updated
-        assert workspace.flow.data["steps"][0]["state"] == StateEnum.Success.value
+        result = flow.set_state("SYNTHESIS", "yosys", StateEnum.Ongoing)
+        assert result is False
+        assert workspace.flow.data["steps"][0]["state"] == StateEnum.Unstart.value
 
     def test_stale_file_causes_rerun_on_resume(self, tmp_path, monkeypatch):
         """When save() fails, file stays stale; a fresh resume load sees stale state."""
@@ -211,7 +209,7 @@ class TestFlowSetStatePersistence:
         }
         flow_path.write_text(json.dumps(flow_data))
 
-        # First run: mark SYNTHESIS as Success but save fails
+        # First run: marking SYNTHESIS as Ongoing fails to persist
         workspace = Workspace(directory=tmp_path)
         workspace.flow.path = flow_path
         workspace.flow.data = json.loads(json.dumps(flow_data))
@@ -222,7 +220,6 @@ class TestFlowSetStatePersistence:
         ]
         monkeypatch.setattr("chipcompiler.utility.json_write", lambda *a, **kw: False)
         engine_flow.set_state("SYNTHESIS", "yosys", StateEnum.Ongoing)
-        engine_flow.set_state("SYNTHESIS", "yosys", StateEnum.Success)
         # File is still Unstart (save failed)
 
         # Simulate resume: fresh load from disk (what production does)
