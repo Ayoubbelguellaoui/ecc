@@ -43,13 +43,16 @@ class AgentEngineFlow(EngineFlow):
         result = False
         try:
             with capture_stdio_to_file(workspace_step.log.file or ""):
-                result = run_agent_step(
-                    workspace=self.workspace, step=workspace_step, ecc_module=self.engine_db.engine
-                )
-                self.workspace.logger.info("[STEP] %s finished result=%s", step_tag, result)
-        except Exception:
-            self.workspace.logger.error("[STEP] %s failed with exception", step_tag)
-            traceback.print_exc()
+                try:
+                    result = run_agent_step(
+                        workspace=self.workspace,
+                        step=workspace_step,
+                        ecc_module=self.engine_db.engine,
+                    )
+                    self.workspace.logger.info("[STEP] %s finished result=%s", step_tag, result)
+                except Exception:
+                    self.workspace.logger.error("[STEP] %s failed with exception", step_tag)
+                    traceback.print_exc()
         finally:
             self._stop_memory_monitor(stop_monitor, monitor)
 

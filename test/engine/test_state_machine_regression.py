@@ -14,7 +14,7 @@ from types import SimpleNamespace
 import pytest
 
 from chipcompiler import tools
-from chipcompiler.data import EccOutput, EccStep, OriginDesign, StateEnum, Workspace
+from chipcompiler.data import EccOutput, EccStep, LogPaths, OriginDesign, StateEnum, Workspace
 from chipcompiler.data.workspace import Flow
 from chipcompiler.engine.flow import _VALID_TRANSITIONS, EngineFlow
 from chipcompiler.utility import Logger
@@ -431,3 +431,51 @@ class TestLegacyStateNormalization:
 
         persisted = json.loads((tmp_path / "home" / "flow.json").read_text())
         assert persisted["steps"][1]["state"] == StateEnum.Success.value
+
+
+def test_agent_exception_traceback_lands_in_step_log(tmp_path, monkeypatch):
+    """AgentEngineFlow must record tool exceptions inside the capture scope."""
+    import agent.engine as agent_engine
+
+    log_file = tmp_path / "agent_step.log"
+    step_dir = tmp_path / "Floorplan_ecc"
+    step_dir.mkdir()
+
+    workspace = Workspace(directory=tmp_path, flow=Flow(path=tmp_path / "flow.json"))
+    workspace.flow.data = {
+        "steps": [
+            {
+                "name": "Floorplan",
+                "tool": "ecc",
+                "state": StateEnum.Unstart.value,
+                "runtime": "",
+                "peak memory (mb)": 0,
+                "info": {},
+            }
+        ]
+    }
+
+    agent_flow = agent_engine.AgentEngineFlow.__new__(agent_engine.AgentEngineFlow)
+    agent_flow.workspace = workspace
+    agent_flow.workspace_steps = [
+        EccStep(
+            name="Floorplan",
+            tool="ecc",
+            directory=step_dir,
+            output=EccOutput(verilog=step_dir / "design.v"),
+            log=LogPaths(file=log_file),
+        )
+    ]
+    agent_flow.engine_db = SimpleNamespace(engine=None)
+
+    def _raise(**_kw):
+        raise RuntimeError("native tool failed")
+
+    monkeypatch.setattr(agent_engine, "run_agent_step", _raise)
+
+    result = agent_flow.run_step(agent_flow.workspace_steps[0], rerun=False)
+    assert result == StateEnum.Imcomplete
+
+    log_content = log_file.read_text()
+    assert "native tool failed" in log_content
+    assert "failed with exception" in log_content

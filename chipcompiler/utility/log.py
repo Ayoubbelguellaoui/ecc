@@ -14,15 +14,15 @@ from typing import TextIO
 # ponytail: process-wide fds require one lock; move tools to subprocesses for parallel capture.
 stdio_redirect_lock = threading.RLock()
 
-_active_redirect: "_StdioRedirect | None" = None
+_persistent_redirect: "_StdioRedirect | None" = None
 
 
-def _close_active_redirect() -> None:
-    """Close the process-wide active redirect if any."""
-    global _active_redirect
-    if _active_redirect is not None:
-        prev = _active_redirect
-        _active_redirect = None
+def _close_persistent_redirect() -> None:
+    """Close the process-wide persistent redirect if any."""
+    global _persistent_redirect
+    if _persistent_redirect is not None:
+        prev = _persistent_redirect
+        _persistent_redirect = None
         prev.close()
 
 
@@ -84,16 +84,17 @@ def flush_cstdio() -> None:
 
 
 class _StdioRedirect:
-    def __init__(self, log_file: str, *, acquire_lock: bool = True):
+    def __init__(self, log_file: str, *, acquire_lock: bool = True, track_persistent: bool = False):
         self.log_file = log_file
         self._acquire_lock = acquire_lock
+        self._track_persistent = track_persistent
         self._lock_acquired = False
         self._saved_fds: tuple[int, int] | None = None
         self._saved_streams: tuple[TextIO, TextIO] | None = None
         self._log_stream: TextIO | None = None
 
     def __enter__(self) -> "_StdioRedirect":
-        global _active_redirect
+        global _persistent_redirect
         if self._acquire_lock:
             stdio_redirect_lock.acquire()
             self._lock_acquired = True
@@ -115,7 +116,8 @@ class _StdioRedirect:
             os.dup2(self._log_stream.fileno(), 2)
             sys.stdout = os.fdopen(1, "w", encoding="utf-8", buffering=1, closefd=False)
             sys.stderr = os.fdopen(2, "w", encoding="utf-8", buffering=1, closefd=False)
-            _active_redirect = self
+            if self._track_persistent:
+                _persistent_redirect = self
             return self
         except BaseException:
             self._restore()
@@ -140,11 +142,11 @@ class _StdioRedirect:
             self._log_stream.flush()
 
     def _restore(self) -> None:
-        global _active_redirect
+        global _persistent_redirect
         if self._saved_fds is None:
             return
-        if _active_redirect is self:
-            _active_redirect = None
+        if self._track_persistent and _persistent_redirect is self:
+            _persistent_redirect = None
         for stream in (sys.stdout, sys.stderr):
             with suppress(Exception):
                 stream.flush()
@@ -169,8 +171,8 @@ def redirect_stdio_to_file(log_file: str) -> _StdioRedirect:
     Does NOT acquire stdio_redirect_lock; callers that need serialized
     redirects should use capture_stdio_to_file() instead.
     """
-    _close_active_redirect()
-    redirect = _StdioRedirect(log_file, acquire_lock=False)
+    _close_persistent_redirect()
+    redirect = _StdioRedirect(log_file, acquire_lock=False, track_persistent=True)
     redirect.__enter__()
     return redirect
 
