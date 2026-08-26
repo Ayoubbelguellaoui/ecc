@@ -14,6 +14,17 @@ from typing import TextIO
 # ponytail: process-wide fds require one lock; move tools to subprocesses for parallel capture.
 stdio_redirect_lock = threading.RLock()
 
+_active_redirect: "_StdioRedirect | None" = None
+
+
+def _close_active_redirect() -> None:
+    """Close the process-wide active redirect if any."""
+    global _active_redirect
+    if _active_redirect is not None:
+        prev = _active_redirect
+        _active_redirect = None
+        prev.close()
+
 
 # TODO: Move some functions to Logger Module
 def build_timestamped_log_file(log_file: str, pid: int | None = None) -> str:
@@ -82,11 +93,18 @@ class _StdioRedirect:
         self._log_stream: TextIO | None = None
 
     def __enter__(self) -> "_StdioRedirect":
+        global _active_redirect
         if self._acquire_lock:
             stdio_redirect_lock.acquire()
             self._lock_acquired = True
         try:
-            self._saved_fds = (os.dup(1), os.dup(2))
+            fd1 = os.dup(1)
+            try:
+                fd2 = os.dup(2)
+            except BaseException:
+                os.close(fd1)
+                raise
+            self._saved_fds = (fd1, fd2)
             self._saved_streams = (sys.stdout, sys.stderr)
             self._log_stream = open(self.log_file, "a", encoding="utf-8", buffering=1)
             for stream in (sys.stdout, sys.stderr):
@@ -97,6 +115,7 @@ class _StdioRedirect:
             os.dup2(self._log_stream.fileno(), 2)
             sys.stdout = os.fdopen(1, "w", encoding="utf-8", buffering=1, closefd=False)
             sys.stderr = os.fdopen(2, "w", encoding="utf-8", buffering=1, closefd=False)
+            _active_redirect = self
             return self
         except BaseException:
             self._restore()
@@ -121,16 +140,20 @@ class _StdioRedirect:
             self._log_stream.flush()
 
     def _restore(self) -> None:
+        global _active_redirect
         if self._saved_fds is None:
             return
+        if _active_redirect is self:
+            _active_redirect = None
         for stream in (sys.stdout, sys.stderr):
             with suppress(Exception):
                 stream.flush()
         flush_cstdio()
-        os.dup2(self._saved_fds[0], 1)
-        os.dup2(self._saved_fds[1], 2)
-        os.close(self._saved_fds[0])
-        os.close(self._saved_fds[1])
+        with suppress(OSError):
+            os.dup2(self._saved_fds[0], 1)
+            os.dup2(self._saved_fds[1], 2)
+            os.close(self._saved_fds[0])
+            os.close(self._saved_fds[1])
         if self._saved_streams is not None:
             sys.stdout, sys.stderr = self._saved_streams
         if self._log_stream is not None:
@@ -146,6 +169,7 @@ def redirect_stdio_to_file(log_file: str) -> _StdioRedirect:
     Does NOT acquire stdio_redirect_lock; callers that need serialized
     redirects should use capture_stdio_to_file() instead.
     """
+    _close_active_redirect()
     redirect = _StdioRedirect(log_file, acquire_lock=False)
     redirect.__enter__()
     return redirect
@@ -171,7 +195,7 @@ def init_api_runtime_log(
     resolved = os.path.abspath(os.path.expanduser(log_file))
     os.makedirs(os.path.dirname(resolved) or ".", exist_ok=True)
     rotate_log_on_start(resolved, max_bytes, backup_count)
-    _StdioRedirect(resolved, acquire_lock=False).__enter__()
+    redirect_stdio_to_file(resolved)
     return resolved
 
 
