@@ -141,8 +141,12 @@ class _StdioRedirect:
 
 
 def redirect_stdio_to_file(log_file: str) -> _StdioRedirect:
-    """Redirect process stdout/stderr to log_file at file-descriptor level."""
-    redirect = _StdioRedirect(log_file)
+    """Redirect process stdout/stderr to log_file at file-descriptor level.
+
+    Does NOT acquire stdio_redirect_lock; callers that need serialized
+    redirects should use capture_stdio_to_file() instead.
+    """
+    redirect = _StdioRedirect(log_file, acquire_lock=False)
     redirect.__enter__()
     return redirect
 
