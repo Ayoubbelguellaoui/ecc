@@ -1,6 +1,5 @@
 #!/usr/bin/env python
 
-import hashlib
 import logging
 import os
 import time
@@ -14,6 +13,7 @@ from chipcompiler.engine.signoff import (
     SignoffPackageResult,
 )
 from chipcompiler.engine.step_execution import execute_tool_step, record_tool_failure
+from chipcompiler.utility import file_digest
 
 logger = logging.getLogger(__name__)
 
@@ -102,7 +102,13 @@ class EngineFlow:
     def has_init(self):
         return self.workspace is not None and len(self.workspace.flow.data.get("steps", [])) > 0
 
-    def init_flow_step(self, step: StepEnum | str, tool: str, state: str | StateEnum):
+    def init_flow_step(
+        self,
+        step: StepEnum | str,
+        tool: str,
+        state: str | StateEnum,
+        info: dict | None = None,
+    ):
         step_value = step.value if isinstance(step, StepEnum) else step
         state_value = state.value if isinstance(state, StateEnum) else state
         return {
@@ -111,12 +117,18 @@ class EngineFlow:
             "state": state_value,  # step state
             "runtime": "",  # step run time
             "peak memory (mb)": 0,  # step peak memory
-            "info": {},  # step additional infomation
+            "info": info or {},  # step additional infomation
         }
 
-    def add_step(self, step: StepEnum | str, tool: str, state: str | StateEnum):
+    def add_step(
+        self,
+        step: StepEnum | str,
+        tool: str,
+        state: str | StateEnum,
+        info: dict | None = None,
+    ):
         steps = self.workspace.flow.data.get("steps", [])
-        steps.append(self.init_flow_step(step, tool, state))
+        steps.append(self.init_flow_step(step, tool, state, info=info))
 
         self.workspace.flow.data = {"steps": steps}
 
@@ -230,12 +242,23 @@ class EngineFlow:
         """
         check step output exist
         """
-        import os
 
         success = False
         output = workspace_step.output
         # HARDEN/RCX/GDS results live on the place-and-route (ecc) output leaves.
         ecc_output = output if isinstance(output, EccOutput) else None
+        if workspace_step.tool == "yosys_lec" or workspace_step.name in (
+            StepEnum.LEC.value,
+            StepEnum.POST_ROUTE_LEC.value,
+        ):
+            from chipcompiler.tools.yosys_lec.utility import lec_result_is_proven
+
+            step_input = workspace_step.input
+            return lec_result_is_proven(
+                output.json,
+                golden_verilog=getattr(step_input, "golden_verilog", None),
+                gate_verilog=getattr(step_input, "gate_verilog", None),
+            )
         match workspace_step.name:
             case StepEnum.SYNTHESIS.value:
                 if os.path.exists(output.verilog or ""):
@@ -301,6 +324,8 @@ class EngineFlow:
         """
         self.workspace_steps = []
         pre_step = None
+        synthesis_gate_verilog = ""
+        synthesis_golden_verilog = ""
         for step in self.workspace.flow.data.get("steps", []):
             if pre_step is None:
                 # use the origin def and verilog in workspace for the first step.
@@ -314,6 +339,16 @@ class EngineFlow:
                 input_db = pre_step.output.db
 
             from chipcompiler.tools import create_step
+
+            if step["tool"] == "yosys_lec":
+                step_info = step.get("info", {}) or {}
+                explicit_golden = step_info.get("golden_verilog") or None
+                if explicit_golden:
+                    input_db = explicit_golden
+                elif step["name"] == StepEnum.POST_ROUTE_LEC.value:
+                    input_db = synthesis_gate_verilog or self.workspace.design.origin_verilog
+                elif pre_step is not None and pre_step.name == StepEnum.SYNTHESIS.value:
+                    input_db = synthesis_golden_verilog or None
 
             # create workspace step
             eda_step = create_step(
@@ -337,7 +372,11 @@ class EngineFlow:
                 ):
                     eda_step.output.spef = pre_step.output.spef
                 self.workspace_steps.append(eda_step)
-                pre_step = eda_step
+                if eda_step.tool != "yosys_lec":
+                    pre_step = eda_step
+                if eda_step.name == StepEnum.SYNTHESIS.value:
+                    synthesis_gate_verilog = eda_step.output.verilog
+                    synthesis_golden_verilog = getattr(eda_step.output, "golden_verilog", None)
             else:
                 self.set_state(name=step["name"], tool=step["tool"], state=StateEnum.Imcomplete)
                 logger.error(
@@ -384,19 +423,13 @@ class EngineFlow:
         if sdc_path is None:
             return {"availability": "missing_source"}
 
-        try:
-            path = os.fspath(sdc_path)
-            size_bytes = os.path.getsize(path)
-            digest = hashlib.sha256()
-            with open(path, "rb") as sdc_file:
-                for chunk in iter(lambda: sdc_file.read(1024 * 1024), b""):
-                    digest.update(chunk)
-        except OSError:
+        digest = file_digest(sdc_path)
+        if digest is None:
             return {"availability": "unreadable"}
-
+        sha256, size_bytes = digest
         return {
             "availability": "available",
-            "sha256": digest.hexdigest(),
+            "sha256": sha256,
             "size_bytes": size_bytes,
         }
 

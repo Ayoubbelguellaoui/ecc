@@ -4,6 +4,7 @@ from pathlib import Path
 from chipcompiler.data import OriginDesign, Parameters, StateEnum, Workspace
 from chipcompiler.engine import EngineFlow
 from chipcompiler.engine.signoff import SignoffPackageOptions
+from chipcompiler.utility import file_digest
 
 STA_REPORT_NAMES = (
     "qor_summary.rpt",
@@ -63,10 +64,12 @@ def _make_signoff_workspace(
         workspace_dir / "home" / "flow.json",
         {
             "steps": [
+                {"name": "Synthesis", "tool": "yosys", "state": StateEnum.Success.value},
                 {"name": "route", "tool": "ecc", "state": StateEnum.Success.value},
                 {"name": "drc", "tool": "ecc", "state": StateEnum.Success.value},
                 {"name": "lvs", "tool": "ecc", "state": StateEnum.Success.value},
                 {"name": "filler", "tool": "ecc", "state": StateEnum.Success.value},
+                {"name": "postRouteLec", "tool": "yosys_lec", "state": StateEnum.Success.value},
                 {"name": "RCX", "tool": "ecc", "state": StateEnum.Success.value},
                 {"name": "sta", "tool": "ecc", "state": StateEnum.Success.value},
                 {"name": "Harden", "tool": "ecc", "state": StateEnum.Success.value},
@@ -94,6 +97,36 @@ def _make_signoff_workspace(
     _write(workspace_dir / "filler_ecc" / "output" / f"{design}_filler.gds")
     _write(workspace_dir / "filler_ecc" / "output" / f"{design}_filler.png")
     _write(workspace_dir / "RCX_ecc" / "output" / f"{top_module}_RCworst_125C.spef")
+    golden = workspace_dir / "Synthesis_yosys" / "output" / f"{design}_Synthesis.v.gz"
+    gate = workspace_dir / "filler_ecc" / "output" / f"{design}_filler.v.gz"
+    golden_digest = file_digest(golden)
+    gate_digest = file_digest(gate)
+    _write_json(
+        workspace_dir / "postRouteLec_yosys_lec" / "output" / f"{design}_postRouteLec_result.json",
+        {
+            "status": "proven",
+            "golden_verilog": str(golden),
+            "gate_verilog": str(gate),
+            "golden_sha256": golden_digest[0],
+            "gate_sha256": gate_digest[0],
+            "golden_size_bytes": golden_digest[1],
+            "gate_size_bytes": gate_digest[1],
+            "equiv_status": str(
+                workspace_dir / "postRouteLec_yosys_lec" / "report" / "equiv_status.rpt"
+            ),
+            "status_report": str(
+                workspace_dir / "postRouteLec_yosys_lec" / "report" / "run_lec_status.rpt"
+            ),
+        },
+    )
+    _write(
+        workspace_dir / "postRouteLec_yosys_lec" / "report" / "equiv_status.rpt",
+        "Equivalence successfully proven!\n",
+    )
+    _write(
+        workspace_dir / "postRouteLec_yosys_lec" / "report" / "run_lec_status.rpt",
+        "Yosys LEC completed with proven equivalence.\n",
+    )
 
     sta_dir = workspace_dir / "sta_ecc" / "report" / "MAX_125" / "RCworst"
     for report_name in STA_REPORT_NAMES:
@@ -199,6 +232,10 @@ def test_collect_signoff_package_uses_final_design_layout(tmp_path):
     assert (package_dir / "final" / "design" / "gcd.png").is_file()
     assert (package_dir / "final" / "timing" / "spef" / "gcd_RCworst_125C.spef").is_file()
     assert (package_dir / "final" / "reports" / "flow.json").is_file()
+    assert (package_dir / "final" / "reports" / "postRouteLec" / "result.json").is_file()
+    assert (
+        package_dir / "final" / "reports" / "postRouteLec" / "report" / "equiv_status.rpt"
+    ).is_file()
     assert not (package_dir / "signoff").exists()
     assert not (package_dir / "final" / "final").exists()
 
@@ -206,6 +243,8 @@ def test_collect_signoff_package_uses_final_design_layout(tmp_path):
     assert summary["initial"]["verilog"] == "initial/gcd.v"
     assert summary["synthesis"]["verilog"] == "synthesis/gcd.v.gz"
     assert summary["final"]["verilog"] == "final/design/gcd.v.gz"
+    assert summary["lec"]["status"] == "proven"
+    assert summary["lec"]["result"] == "final/reports/postRouteLec/result.json"
     assert summary["qor_metrics"]["schema_version"] == 3
     assert (
         summary["sta_matrix"][0]["report"]
@@ -254,23 +293,170 @@ def test_collect_signoff_package_requires_synthesis_verilog(tmp_path):
     )
 
 
+def test_collect_signoff_package_rejects_stale_post_route_lec_proof(tmp_path):
+    workspace_dir = _make_signoff_workspace(tmp_path)
+    filler = workspace_dir / "filler_ecc" / "output" / "gcd_filler.v.gz"
+    filler.write_text("module gcd; updated\n")
+
+    result = _make_engine_flow(workspace_dir).collect_signoff_package(
+        SignoffPackageOptions(archive=False, materialize=False)
+    )
+
+    assert result.ok is False
+    assert any(
+        issue.label == "lec.result"
+        and issue.destination == "final/reports/postRouteLec/result.json"
+        and "stale" in issue.reason
+        and issue.required
+        for issue in result.issues
+    )
+
+
+def test_collect_signoff_package_rejects_lec_proof_bound_to_copied_netlists(tmp_path):
+    workspace_dir = _make_signoff_workspace(tmp_path)
+    old_golden = tmp_path / "old" / "gcd_Synthesis.v.gz"
+    old_gate = tmp_path / "old" / "gcd_filler.v.gz"
+    current_golden = workspace_dir / "Synthesis_yosys" / "output" / "gcd_Synthesis.v.gz"
+    current_gate = workspace_dir / "filler_ecc" / "output" / "gcd_filler.v.gz"
+    _write(old_golden, current_golden.read_text())
+    _write(old_gate, current_gate.read_text())
+    golden_digest = file_digest(old_golden)
+    gate_digest = file_digest(old_gate)
+    _write_json(
+        workspace_dir / "postRouteLec_yosys_lec" / "output" / "gcd_postRouteLec_result.json",
+        {
+            "status": "proven",
+            "golden_verilog": str(old_golden),
+            "gate_verilog": str(old_gate),
+            "golden_sha256": golden_digest[0],
+            "gate_sha256": gate_digest[0],
+            "golden_size_bytes": golden_digest[1],
+            "gate_size_bytes": gate_digest[1],
+        },
+    )
+    current_gate.write_text("module gcd; current\n")
+
+    result = _make_engine_flow(workspace_dir).collect_signoff_package(
+        SignoffPackageOptions(archive=False, materialize=False)
+    )
+
+    assert result.ok is False
+    assert any(
+        issue.label == "lec.result"
+        and issue.destination == "final/reports/postRouteLec/result.json"
+        and "stale" in issue.reason
+        and issue.required
+        for issue in result.issues
+    )
+
+
+def test_collect_signoff_package_ignores_stale_post_route_lec_checklist(tmp_path):
+    workspace_dir = _make_signoff_workspace(tmp_path)
+    _write_json(
+        workspace_dir / "postRouteLec_yosys_lec" / "checklist.json",
+        {
+            "schema_version": 3,
+            "kind": "signoff_checklist",
+            "checklist": [
+                {
+                    "id": "artifact.postroutelec.result",
+                    "step": "postRouteLec",
+                    "category": "artifact",
+                    "owner": "checklist",
+                    "policy": "block",
+                    "state": "failed",
+                    "blocked": True,
+                    "title": "Yosys LEC result",
+                    "summary": "Yosys LEC did not prove equivalence.",
+                    "source": {},
+                    "evidence": [],
+                }
+            ],
+        },
+    )
+
+    result = _make_engine_flow(workspace_dir).collect_signoff_package(
+        SignoffPackageOptions(archive=False, materialize=False)
+    )
+
+    assert result.ok is True
+    assert "artifact.postroutelec.result" not in result.missing_required
+
+
+def test_collect_signoff_package_requires_proven_post_route_lec(tmp_path):
+    workspace_dir = _make_signoff_workspace(tmp_path)
+    _write_json(
+        workspace_dir / "postRouteLec_yosys_lec" / "output" / "gcd_postRouteLec_result.json",
+        {"status": "incomplete"},
+    )
+
+    result = _make_engine_flow(workspace_dir).collect_signoff_package(
+        SignoffPackageOptions(archive=False, materialize=False)
+    )
+
+    assert result.ok is False
+    assert any(
+        issue.label == "lec.result"
+        and issue.destination == "final/reports/postRouteLec/result.json"
+        and issue.reason == "Yosys LEC did not prove equivalence"
+        and issue.required
+        for issue in result.issues
+    )
+
+
+def test_collect_signoff_package_requires_post_route_lec_even_if_flow_omits_it(tmp_path):
+    workspace_dir = _make_signoff_workspace(tmp_path)
+    flow = json.loads((workspace_dir / "home" / "flow.json").read_text())
+    flow["steps"] = [step for step in flow["steps"] if step.get("name") != "postRouteLec"]
+    _write_json(workspace_dir / "home" / "flow.json", flow)
+
+    result = _make_engine_flow(workspace_dir).collect_signoff_package(
+        SignoffPackageOptions(archive=False, materialize=False)
+    )
+
+    assert result.ok is False
+    assert any(issue.location == "postRouteLec" and issue.required for issue in result.issues)
+
+
+def _rewrite_flow_without_synthesis(workspace_dir: Path, first_step: dict) -> None:
+    flow = json.loads((workspace_dir / "home" / "flow.json").read_text())
+    flow["steps"] = [
+        first_step,
+        *[step for step in flow["steps"] if step.get("name") != "Synthesis"],
+    ]
+    _write_json(workspace_dir / "home" / "flow.json", flow)
+
+
+def _bind_post_route_lec(workspace_dir: Path, golden: Path, gate: Path) -> None:
+    golden_digest = file_digest(golden)
+    gate_digest = file_digest(gate)
+    _write_json(
+        workspace_dir / "postRouteLec_yosys_lec" / "output" / "gcd_postRouteLec_result.json",
+        {
+            "status": "proven",
+            "golden_verilog": str(golden),
+            "gate_verilog": str(gate),
+            "golden_sha256": golden_digest[0],
+            "gate_sha256": gate_digest[0],
+            "golden_size_bytes": golden_digest[1],
+            "gate_size_bytes": gate_digest[1],
+        },
+    )
+
+
 def test_collect_signoff_package_uses_origin_rtl_for_floorplan_start(tmp_path):
     workspace_dir = _make_signoff_workspace(tmp_path)
     (workspace_dir / "Synthesis_yosys" / "output" / "gcd_Synthesis.v.gz").unlink()
-    _write(
-        workspace_dir / "origin" / "gcd.v",
-        "module gcd; // original imported RTL\nendmodule\n",
-    )
-    flow = json.loads((workspace_dir / "home" / "flow.json").read_text())
-    flow["steps"].insert(
-        0,
+    origin = workspace_dir / "origin" / "gcd.v"
+    _write(origin, "module gcd; // original imported RTL\nendmodule\n")
+    _rewrite_flow_without_synthesis(
+        workspace_dir,
         {"name": "Floorplan", "tool": "ecc", "state": StateEnum.Success.value},
     )
-    _write_json(workspace_dir / "home" / "flow.json", flow)
     engine_flow = _make_engine_flow(workspace_dir)
-    external_rtl = tmp_path / "external" / "gcd.v"
-    _write(external_rtl, "module gcd; // outside the workspace\nendmodule\n")
-    engine_flow.workspace.design.origin_verilog = external_rtl
+    engine_flow.workspace.design.origin_verilog = origin
+    gate = workspace_dir / "filler_ecc" / "output" / "gcd_filler.v.gz"
+    _bind_post_route_lec(workspace_dir, origin, gate)
 
     result = engine_flow.collect_signoff_package(SignoffPackageOptions(archive=True))
 
@@ -283,6 +469,37 @@ def test_collect_signoff_package_uses_origin_rtl_for_floorplan_start(tmp_path):
     summary = json.loads((package_dir / "summary.json").read_text())
     assert summary["initial"]["verilog"] == "initial/gcd.v"
     assert "synthesis" not in summary
+    assert summary["lec"]["status"] == "proven"
+
+
+def test_collect_signoff_package_ignores_leftover_synthesis_for_floorplan_start(tmp_path):
+    workspace_dir = _make_signoff_workspace(tmp_path)
+    leftover = workspace_dir / "Synthesis_yosys" / "output" / "gcd_Synthesis.v.gz"
+    leftover.write_text("module gcd; leftover mapped netlist\nendmodule\n")
+    origin = workspace_dir / "origin" / "gcd.v"
+    _write(origin, "module gcd; // imported mapped netlist\nendmodule\n")
+    _rewrite_flow_without_synthesis(
+        workspace_dir,
+        {"name": "Floorplan", "tool": "ecc", "state": StateEnum.Success.value},
+    )
+    engine_flow = _make_engine_flow(workspace_dir)
+    engine_flow.workspace.design.origin_verilog = origin
+    gate = workspace_dir / "filler_ecc" / "output" / "gcd_filler.v.gz"
+    _bind_post_route_lec(workspace_dir, origin, gate)
+
+    result = engine_flow.collect_signoff_package(SignoffPackageOptions(archive=True))
+
+    assert result.ok is True
+    package_dir = Path(result.package_dir)
+    assert leftover.is_file()
+    assert (package_dir / "initial" / "gcd.v").read_text() == (
+        "module gcd; // imported mapped netlist\nendmodule\n"
+    )
+    assert not (package_dir / "synthesis" / "gcd.v.gz").exists()
+    summary = json.loads((package_dir / "summary.json").read_text())
+    assert "synthesis" not in summary
+    assert summary["lec"]["status"] == "proven"
+    assert summary["lec"]["golden_verilog"] == str(origin)
 
 
 def test_collect_signoff_package_tolerates_missing_sta_power_report(tmp_path):
