@@ -182,20 +182,29 @@ def _existing_input_path(path: Path | None) -> str | None:
     return None
 
 
-def create_db_engine(workspace: Workspace, step: WorkspaceStep) -> ECCToolsModule:
-    """"""
+def create_db_engine(workspace: Workspace, step: WorkspaceStep) -> ECCToolsModule | None:
+    """Load an ECC engine from the step input."""
 
-    def load_data():
+    def _close_engine(ecc_module: ECCToolsModule | None) -> None:
+        if ecc_module is None:
+            return
+        close = getattr(ecc_module, "close", None)
+        if callable(close):
+            close()
+
+    def load_data() -> ECCToolsModule | None:
         ecc_module = ECCToolsModule()
+        keep = False
+        try:
+            ecc_module.init_config(
+                db_config=workspace.config.get("db"),
+                output_dir=step.data.dir,
+                feature_dir=step.feature.dir,
+            )
 
-        ecc_module.init_config(
-            db_config=workspace.config.get("db"),
-            output_dir=step.data.dir,
-            feature_dir=step.feature.dir,
-        )
-
-        db_path = step.input.db or ""
-        if ecc_module.is_db_data_exists(db_path):
+            db_path = step.input.db or ""
+            if not ecc_module.is_db_data_exists(db_path):
+                return None
             try:
                 loaded = ecc_module.load_data(path=db_path)
             except Exception as e:
@@ -211,49 +220,49 @@ def create_db_engine(workspace: Workspace, step: WorkspaceStep) -> ECCToolsModul
                 return None
 
             workspace.logger.info(f"Successfully loaded data from {db_path}")
+            keep = True
             return ecc_module
-        else:
-            return None
+        finally:
+            if not keep:
+                _close_engine(ecc_module)
 
-    def load_design():
-        def def_exist() -> str | None:
-            return _existing_input_path(step.input.def_)
-
-        def verilog_exist() -> str | None:
-            return _existing_input_path(step.input.verilog)
-
+    def load_design() -> ECCToolsModule | None:
         ecc_module = ECCToolsModule()
+        keep = False
+        try:
+            ecc_module.init_config(
+                db_config=workspace.config.get("db"),
+                output_dir=step.data.dir,
+                feature_dir=step.feature.dir,
+            )
 
-        ecc_module.init_config(
-            db_config=workspace.config.get("db"),
-            output_dir=step.data.dir,
-            feature_dir=step.feature.dir,
-        )
+            ecc_module.init_techlef(workspace.pdk.tech)
+            ecc_module.init_lefs(workspace.pdk.lefs)
 
-        ecc_module.init_techlef(workspace.pdk.tech)
-        ecc_module.init_lefs(workspace.pdk.lefs)
+            def_path = _existing_input_path(step.input.def_)
+            verilog_path = _existing_input_path(step.input.verilog)
 
-        # if db def exist, read db def
-        def_path = def_exist()
-        verilog_path = verilog_exist()
-
-        if step.name == StepEnum.LVS.value:
-            if def_path is None:
+            if step.name == StepEnum.LVS.value:
+                if def_path is None or not ecc_module.read_def(def_path):
+                    return None
+            elif def_path is not None:
+                if not ecc_module.read_def(def_path):
+                    return None
+            elif verilog_path:
+                ecc_module.read_verilog(
+                    verilog=verilog_path,
+                    top_module=workspace.design.top_module,
+                )
+            else:
                 return None
-            if not ecc_module.read_def(def_path):
-                return None
-        elif def_path is not None:
-            ecc_module.read_def(def_path)
-        elif verilog_path:
-            # else, read step output verilog
-            ecc_module.read_verilog(verilog=verilog_path, top_module=workspace.design.top_module)
-        else:
-            return None
 
-        return ecc_module
+            keep = True
+            return ecc_module
+        finally:
+            if not keep:
+                _close_engine(ecc_module)
 
-    def is_enable_setup():
-        # skip synthesis step
+    def is_enable_setup() -> bool:
         if step.name == StepEnum.SYNTHESIS.value:
             return False
 
@@ -264,14 +273,18 @@ def create_db_engine(workspace: Workspace, step: WorkspaceStep) -> ECCToolsModul
 
     if not is_eda_exist() or not is_enable_setup():
         return None
+
+    if step.name == StepEnum.LVS.value or not step.input.db:
+        return load_design()
+
+    ecc_module = None
     try:
-        ecc_module = None if step.name == StepEnum.LVS.value else load_data()
-        if ecc_module is None:
-            ecc_module = load_design()
+        ecc_module = load_data()
     except Exception as e:
         workspace.logger.warning("Failed to load ECC data; falling back to design input: %s", e)
+        ecc_module = None
+    if ecc_module is None:
         ecc_module = load_design()
-
     return ecc_module
 
 

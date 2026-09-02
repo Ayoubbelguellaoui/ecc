@@ -90,6 +90,7 @@ class EngineFlow:
         steps.append(self.init_flow_step(StepEnum.PLACEMENT, "dreamplace", StateEnum.Unstart))
         steps.append(self.init_flow_step(StepEnum.CTS, "ecc", StateEnum.Unstart))
         steps.append(self.init_flow_step(StepEnum.LEGALIZATION, "dreamplace", StateEnum.Unstart))
+        steps.append(self.init_flow_step(StepEnum.TIMING_OPT, "sizer", StateEnum.Unstart))
         steps.append(self.init_flow_step(StepEnum.ROUTING, "ecc", StateEnum.Unstart))
         steps.append(self.init_flow_step(StepEnum.FILLER, "ecc", StateEnum.Unstart))
         # steps.append(self.init_flow_step(StepEnum.GDS, "klayout", StateEnum.Unstart))
@@ -410,7 +411,8 @@ class EngineFlow:
         return self.engine_db.create_db_engine(step=workspace_step)
 
     def clear_db_engine_after_step(self, workspace_step: WorkspaceStep, state: StateEnum) -> None:
-        if workspace_step.tool == "sizer" and state == StateEnum.Success:
+        _ = state
+        if workspace_step.tool == "sizer":
             engine_db = self.engine_db
             self.engine_db = None
             if engine_db is not None:

@@ -53,6 +53,9 @@ class FakeEccModule:
     def read_lvs_verilog(self, path, top_module):
         self.calls.append(("read_lvs_verilog", path, top_module))
 
+    def close(self):
+        self.calls.append(("close",))
+
 
 class FakeSynthesisStaModule:
     def __init__(self):
@@ -223,6 +226,116 @@ def test_create_db_engine_uses_def_input_for_lvs_even_when_db_exists(tmp_path, m
     assert not any(call[0] == "load_data" for call in module.calls)
     assert ("read_def", str(design_def)) in module.calls
     assert not any(call[0] == "read_lvs_verilog" for call in module.calls)
+
+
+def test_create_db_engine_reads_replaced_step_input_without_db(tmp_path, monkeypatch):
+    step_def = tmp_path / "step" / "old.def"
+    staging_def = tmp_path / "data" / "to" / "sizer.def.gz"
+    staging_verilog = tmp_path / "data" / "to" / "sizer.v.gz"
+    step_def.parent.mkdir()
+    staging_def.parent.mkdir(parents=True)
+    step_def.write_text("VERSION 5.8 ;\nDESIGN gcd ;\nEND DESIGN\n")
+    staging_def.write_text("VERSION 5.8 ;\nDESIGN gcd ;\nEND DESIGN\n")
+    staging_verilog.write_text("module gcd; endmodule\n")
+
+    workspace = Workspace(
+        directory=tmp_path,
+        design=OriginDesign(name="gcd", top_module="gcd"),
+        pdk=PDK(tech=tmp_path / "tech.lef", lefs=[tmp_path / "std.lef"]),
+        config={"db": tmp_path / "config" / "db_ecc.json"},
+    )
+    step = EccStep(
+        name=StepEnum.TIMING_OPT.value,
+        input=StepInput(
+            def_=staging_def,
+            verilog=staging_verilog,
+            db=None,
+        ),
+        data=EccData(dir=tmp_path / "timing_optimization_sizer" / "data"),
+        feature=EccFeature(dir=tmp_path / "timing_optimization_sizer" / "feature"),
+    )
+    FakeEccModule.instances = []
+    monkeypatch.setattr(ecc_runner, "is_eda_exist", lambda: True)
+    monkeypatch.setattr(ecc_runner, "ECCToolsModule", FakeEccModule)
+    monkeypatch.setattr(FakeEccModule, "is_db_data_exists", lambda self, path: True)
+    monkeypatch.setattr(FakeEccModule, "load_data", lambda self, path: True)
+
+    module = ecc_runner.create_db_engine(workspace, step)
+
+    assert module is FakeEccModule.instances[-1]
+    assert not any(call[0] == "load_data" for call in module.calls)
+    assert ("read_def", str(staging_def)) in module.calls
+    assert not any(call[0] == "read_def" and call[1] == str(step_def) for call in module.calls)
+
+
+def test_create_db_engine_returns_none_and_closes_when_read_def_fails(tmp_path, monkeypatch):
+    design_def = tmp_path / "origin" / "gcd.def"
+    design_def.parent.mkdir()
+    design_def.write_text("VERSION 5.8 ;\nDESIGN gcd ;\nEND DESIGN\n")
+
+    workspace = Workspace(
+        directory=tmp_path,
+        design=OriginDesign(name="gcd", top_module="gcd"),
+        pdk=PDK(tech=tmp_path / "tech.lef", lefs=[tmp_path / "std.lef"]),
+        config={"db": tmp_path / "config" / "db_ecc.json"},
+    )
+    step = EccStep(
+        name=StepEnum.TIMING_OPT.value,
+        input=StepInput(def_=design_def, verilog=tmp_path / "origin" / "gcd.v", db=None),
+        data=EccData(dir=tmp_path / "timing_optimization_sizer" / "data"),
+        feature=EccFeature(dir=tmp_path / "timing_optimization_sizer" / "feature"),
+    )
+    FakeEccModule.instances = []
+    monkeypatch.setattr(ecc_runner, "is_eda_exist", lambda: True)
+    monkeypatch.setattr(ecc_runner, "ECCToolsModule", FakeEccModule)
+
+    def failing_read_def(self, path):
+        self.calls.append(("read_def", path))
+        return False
+
+    monkeypatch.setattr(FakeEccModule, "read_def", failing_read_def)
+
+    module = ecc_runner.create_db_engine(workspace, step)
+
+    assert module is None
+    constructed = FakeEccModule.instances[-1]
+    assert ("read_def", str(design_def)) in constructed.calls
+    assert constructed.calls[-1] == ("close",)
+
+
+def test_create_db_engine_without_input_db_does_not_retry_load_design(tmp_path, monkeypatch):
+    design_def = tmp_path / "origin" / "gcd.def"
+    design_def.parent.mkdir()
+    design_def.write_text("VERSION 5.8 ;\nDESIGN gcd ;\nEND DESIGN\n")
+
+    workspace = Workspace(
+        directory=tmp_path,
+        design=OriginDesign(name="gcd", top_module="gcd"),
+        pdk=PDK(tech=tmp_path / "tech.lef", lefs=[tmp_path / "std.lef"]),
+        config={"db": tmp_path / "config" / "db_ecc.json"},
+        logger=FakeLogger(),
+    )
+    step = EccStep(
+        name=StepEnum.TIMING_OPT.value,
+        input=StepInput(def_=design_def, db=None),
+        data=EccData(dir=tmp_path / "timing_optimization_sizer" / "data"),
+        feature=EccFeature(dir=tmp_path / "timing_optimization_sizer" / "feature"),
+    )
+    constructions = []
+    monkeypatch.setattr(ecc_runner, "is_eda_exist", lambda: True)
+
+    class ExplodingModule:
+        def __init__(self):
+            constructions.append(1)
+            raise RuntimeError("native init failed")
+
+    monkeypatch.setattr(ecc_runner, "ECCToolsModule", ExplodingModule)
+
+    with pytest.raises(RuntimeError, match="native init failed"):
+        ecc_runner.create_db_engine(workspace, step)
+
+    assert constructions == [1]
+    assert workspace.logger.warnings == []
 
 
 def test_run_cts_merges_structured_timing_into_step_feature(tmp_path, monkeypatch):
