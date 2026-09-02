@@ -288,6 +288,7 @@ class RuntimeOperationManager:
                         "operation.completed",
                         {"result": result},
                     )
+                self._cleanup_workspace_active(operation_id)
             except RuntimeOperationCancelled as exc:
                 with self._lock:
                     operation = self._operations[operation_id]
@@ -307,6 +308,7 @@ class RuntimeOperationManager:
                         event_type,
                         {"error": operation.error},
                     )
+                self._cleanup_workspace_active(operation_id)
             except Exception as exc:
                 with self._lock:
                     operation = self._operations[operation_id]
@@ -332,15 +334,17 @@ class RuntimeOperationManager:
                             }
                         )
                     event = self._new_event_locked(operation, event_type, payload)
+                self._cleanup_workspace_active(operation_id)
             self._publish(event)
         finally:
-            try:
-                self._stop_step_log_tail(operation_id)
-            finally:
-                with self._lock:
-                    workspace_id = self._operations[operation_id].workspace_id
-                    if self._active_by_workspace.get(workspace_id) == operation_id:
-                        self._active_by_workspace.pop(workspace_id, None)
+            self._stop_step_log_tail(operation_id)
+
+    def _cleanup_workspace_active(self, operation_id: str) -> None:
+        """Remove operation from _active_by_workspace if it is the current one."""
+        with self._lock:
+            workspace_id = self._operations[operation_id].workspace_id
+            if self._active_by_workspace.get(workspace_id) == operation_id:
+                self._active_by_workspace.pop(workspace_id, None)
 
     def step_started(self, operation_id: str, workspace_step: Any) -> None:
         self._stop_step_log_tail(operation_id)
