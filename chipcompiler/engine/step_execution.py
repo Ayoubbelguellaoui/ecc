@@ -1,6 +1,7 @@
 import logging
 import os
 import time
+import traceback as _traceback_mod
 from dataclasses import dataclass
 from threading import Event, Thread
 
@@ -85,9 +86,13 @@ def execute_tool_step(
                 )
                 workspace.logger.info(f"[STEP] {step_tag} finished result={result}")
             except (Exception, SystemExit) as exc:
-                step_error = record_tool_failure(workspace.logger, step_tag, exc)
+                step_error = record_tool_failure(
+                    workspace.logger, step_tag, exc, step_log_file=log_file
+                )
     except (Exception, SystemExit) as exc:
-        failure_message = record_tool_failure(workspace.logger, step_tag, exc)
+        failure_message = record_tool_failure(
+            workspace.logger, step_tag, exc, step_log_file=log_file
+        )
         step_error = step_error or failure_message
     finally:
         stop_memory_monitor.set()
@@ -99,6 +104,7 @@ def execute_tool_step(
                     workspace.logger,
                     step_tag,
                     exc,
+                    step_log_file=log_file,
                 )
                 step_error = step_error or failure_message
         try:
@@ -108,7 +114,9 @@ def execute_tool_step(
                 else:
                     workspace._runtime_flow_observer = previous_observer
         except (Exception, SystemExit) as exc:
-            failure_message = record_tool_failure(workspace.logger, step_tag, exc)
+            failure_message = record_tool_failure(
+                workspace.logger, step_tag, exc, step_log_file=log_file
+            )
             step_error = step_error or failure_message
 
     peak_memory_mb = peak_memory[0] - start_memory_mb
@@ -126,11 +134,16 @@ def record_tool_failure(
     tool_logger: logging.Logger,
     step_tag: str,
     error: BaseException,
+    step_log_file: str = "",
 ) -> str:
     flush_cstdio()
     message = _tool_error_message(step_tag, error)
     tool_logger.error(f"[STEP] {step_tag} failed: {message}")
     tool_logger.exception(f"[STEP] {step_tag} exception details")
+    if step_log_file:
+        tool_logger.write_to_file(step_log_file, f"[STEP] {step_tag} failed: {message}")
+        tb_text = "".join(_traceback_mod.format_exception(type(error), error, error.__traceback__))
+        tool_logger.write_to_file(step_log_file, tb_text)
     return message
 
 

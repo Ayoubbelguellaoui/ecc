@@ -477,5 +477,12 @@ def test_agent_exception_traceback_lands_in_step_log(tmp_path, monkeypatch):
     assert result == StateEnum.Imcomplete
 
     log_content = log_file.read_text()
+    assert "failed:" in log_content
+    assert "Traceback (most recent call last):" in log_content
     assert "native tool failed" in log_content
-    assert "failed with exception" in log_content
+
+    # Normal logger behavior preserved — console handler still attached
+    assert any(
+        isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler)
+        for h in workspace.logger.logger.handlers
+    )

@@ -270,6 +270,14 @@ class Logger:
         self.logger.info("#" * max_len)
         self.logger.info("")
 
+    def write_to_file(self, path: str, msg: str) -> None:
+        """Append a formatted message directly to *path*, bypassing handlers."""
+        record = self.logger.makeRecord(self.logger.name, logging.INFO, "", 0, msg, (), None)
+        formatter = self.logger.handlers[0].formatter if self.logger.handlers else None
+        text = formatter.format(record) if formatter else msg
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(text + "\n")
+
 
 def create_logger(
     name: str = "ecc",
