@@ -48,6 +48,32 @@ class Flow:
     path: Path | None = None  # flow file path
     data: dict = field(default_factory=dict)  # flow steps
 
+    def steps(self) -> list[dict]:
+        data = self.data if isinstance(self.data, dict) else {}
+        if not data and self.path is not None:
+            from chipcompiler.utility import json_read
+
+            loaded = json_read(self.path)
+            if isinstance(loaded, dict):
+                self.data = loaded
+                data = loaded
+        raw_steps = data.get("steps", [])
+        if not isinstance(raw_steps, list):
+            return []
+        return [step for step in raw_steps if isinstance(step, dict)]
+
+    def get_step(self, name: str | StepEnum, tool: str | None = None) -> dict | None:
+        step_name = name.value if isinstance(name, StepEnum) else name
+        for step in self.steps():
+            if step.get("name") != step_name:
+                continue
+            if tool is None or step.get("tool") == tool:
+                return step
+        return None
+
+    def has_step(self, name: str | StepEnum, tool: str | None = None) -> bool:
+        return self.get_step(name, tool) is not None
+
 
 @dataclass
 class Workspace:
@@ -119,12 +145,10 @@ def log_workspace_step(step: WorkspaceStep, logger: Logger):
 
 
 _WORKSPACE_CONFIG_FILENAMES: Final[dict[str, str]] = {
-    "flow": "flow_ecc.json",
     "db": "db_ecc.json",
     StepEnum.CTS.value: "cts_ecc.json",
     StepEnum.DRC.value: "drc_ecc.json",
     StepEnum.FLOORPLAN.value: "floorplan_ecc.json",
-    StepEnum.NETLIST_OPT.value: "fixfanout_ecc.json",
     StepEnum.ROUTING.value: "route_ecc.json",
     StepEnum.FILLER.value: "filler_ecc.json",
     StepEnum.RCX.value: "rcx_ecc.json",
@@ -133,12 +157,10 @@ _WORKSPACE_CONFIG_FILENAMES: Final[dict[str, str]] = {
 }
 
 _LEGACY_WORKSPACE_CONFIG_FILENAMES: Final[dict[str, str]] = {
-    "flow": "flow_config.json",
     "db": "db_default_config.json",
     StepEnum.CTS.value: "cts_default_config.json",
     StepEnum.DRC.value: "drc_default_config.json",
     StepEnum.FLOORPLAN.value: "fp_default_config.json",
-    StepEnum.NETLIST_OPT.value: "no_default_config_fixfanout.json",
     StepEnum.ROUTING.value: "rt_default_config.json",
     StepEnum.FILLER.value: "pl_default_config.json",
     StepEnum.RCX.value: "rcx.json",
@@ -149,18 +171,18 @@ _LEGACY_WORKSPACE_CONFIG_FILENAMES: Final[dict[str, str]] = {
 _STEP_BY_VALUE: Final[dict[str, StepEnum]] = {step.value: step for step in StepEnum}
 
 _STEP_CONFIG_KEYS: Final[dict[tuple[StepEnum, str], tuple[str, ...]]] = {
-    (StepEnum.FLOORPLAN, "ecc"): ("flow", "db", StepEnum.FLOORPLAN.value),
-    (StepEnum.NETLIST_OPT, "ecc"): ("flow", "db", StepEnum.NETLIST_OPT.value),
-    (StepEnum.PLACEMENT, "ecc"): ("flow", "db"),
-    (StepEnum.CTS, "ecc"): ("flow", "db", StepEnum.CTS.value),
-    (StepEnum.ROUTING, "ecc"): ("flow", "db", StepEnum.ROUTING.value),
-    (StepEnum.DRC, "ecc"): ("flow", "db", StepEnum.DRC.value),
-    (StepEnum.LEGALIZATION, "ecc"): ("flow", "db"),
-    (StepEnum.FILLER, "ecc"): ("flow", "db", StepEnum.FILLER.value),
-    (StepEnum.RCX, "ecc"): ("flow", "db", StepEnum.RCX.value),
-    (StepEnum.STA, "ecc"): ("flow", "db", StepEnum.RCX.value, StepEnum.STA.value),
+    (StepEnum.FLOORPLAN, "ecc"): ("db", StepEnum.FLOORPLAN.value),
+    (StepEnum.PLACEMENT, "ecc"): ("db",),
+    (StepEnum.CTS, "ecc"): ("db", StepEnum.CTS.value),
+    (StepEnum.ROUTING, "ecc"): ("db", StepEnum.ROUTING.value),
+    (StepEnum.DRC, "ecc"): ("db", StepEnum.DRC.value),
+    (StepEnum.LEGALIZATION, "ecc"): ("db",),
+    (StepEnum.FILLER, "ecc"): ("db", StepEnum.FILLER.value),
+    (StepEnum.RCX, "ecc"): ("db", StepEnum.RCX.value),
+    (StepEnum.STA, "ecc"): ("db", StepEnum.RCX.value, StepEnum.STA.value),
     (StepEnum.PLACEMENT, "dreamplace"): ("dreamplace",),
     (StepEnum.LEGALIZATION, "dreamplace"): ("dreamplace",),
+    (StepEnum.TIMING_OPT, "sizer"): ("db", "dreamplace"),
 }
 
 
@@ -181,37 +203,6 @@ def workspace_config_paths(workspace_dir: str | Path) -> dict[str, Path]:
     }
 
 
-def _migrate_flow_config_paths(flow_path: Path) -> None:
-    from chipcompiler.utility import json_read, json_write
-
-    if not flow_path.is_file():
-        return
-
-    flow = json_read(flow_path)
-    config_paths = flow.get("ConfigPath") if isinstance(flow, dict) else None
-    if not isinstance(config_paths, dict):
-        return
-
-    legacy_to_canonical = {
-        legacy_filename: _WORKSPACE_CONFIG_FILENAMES[config_key]
-        for config_key, legacy_filename in _LEGACY_WORKSPACE_CONFIG_FILENAMES.items()
-    }
-    changed = False
-    for config_key, path_value in config_paths.items():
-        if not isinstance(path_value, str):
-            continue
-        canonical_filename = legacy_to_canonical.get(Path(path_value).name)
-        if canonical_filename is None:
-            continue
-        canonical_path = str(Path(path_value).with_name(canonical_filename))
-        if canonical_path != path_value:
-            config_paths[config_key] = canonical_path
-            changed = True
-
-    if changed and not json_write(flow_path, flow):
-        raise OSError(f"Failed to update migrated flow config: {flow_path}")
-
-
 def migrate_workspace_config_filenames(workspace_dir: str | Path) -> None:
     """Rename legacy workspace configs before resolving their canonical paths."""
     config_dir = Path(workspace_dir) / "config"
@@ -223,8 +214,6 @@ def migrate_workspace_config_filenames(workspace_dir: str | Path) -> None:
         canonical_path = config_dir / _WORKSPACE_CONFIG_FILENAMES[config_key]
         if legacy_path.is_file() and not canonical_path.exists():
             legacy_path.rename(canonical_path)
-
-    _migrate_flow_config_paths(config_dir / _WORKSPACE_CONFIG_FILENAMES["flow"])
 
 
 def workspace_config_path(workspace_dir: str | Path, config_key: str) -> Path | None:
@@ -337,8 +326,6 @@ def _normalize_flow_step_name(value) -> str:
         "synthesis": StepEnum.SYNTHESIS.value,
         "floor": StepEnum.FLOORPLAN.value,
         "floorplan": StepEnum.FLOORPLAN.value,
-        "fanout": StepEnum.NETLIST_OPT.value,
-        "fixfanout": StepEnum.NETLIST_OPT.value,
         "place": StepEnum.PLACEMENT.value,
         "placement": StepEnum.PLACEMENT.value,
         "cts": StepEnum.CTS.value,
@@ -391,11 +378,6 @@ def _flag_to_int(value: Any) -> int:
 
 
 PARAMETER_CONFIG_FIELD_MAPPINGS = (
-    WorkspaceConfigParameterMapping(
-        "Max fanout",
-        StepEnum.NETLIST_OPT.value,
-        ("max_fanout",),
-    ),
     WorkspaceConfigParameterMapping(
         "Max fanout",
         StepEnum.CTS.value,
@@ -703,20 +685,6 @@ def refresh_workspace_config(workspace: Workspace) -> None:
     if not workspace.config:
         workspace.config = build_workspace_config_paths(workspace)
 
-    flow = json_read(workspace.config["flow"])
-    if "ConfigPath" not in flow:
-        raise FileNotFoundError(
-            f"Flow config missing or corrupt (no 'ConfigPath' key): {workspace.config['flow']}"
-        )
-    flow["ConfigPath"]["idb_path"] = str(workspace.config["db"])
-    flow["ConfigPath"]["ifp_path"] = str(workspace.config[f"{StepEnum.FLOORPLAN.value}"])
-    flow["ConfigPath"].pop("ipl_path", None)
-    flow["ConfigPath"]["irt_path"] = str(workspace.config[f"{StepEnum.ROUTING.value}"])
-    flow["ConfigPath"]["idrc_path"] = str(workspace.config[f"{StepEnum.DRC.value}"])
-    flow["ConfigPath"]["icts_path"] = str(workspace.config[f"{StepEnum.CTS.value}"])
-    if not json_write(workspace.config["flow"], flow):
-        raise OSError(f"Failed to write flow config: {workspace.config['flow']}")
-
     db = json_read(workspace.config["db"])
     if "INPUT" not in db or "LayerSettings" not in db:
         raise FileNotFoundError(
@@ -732,16 +700,7 @@ def refresh_workspace_config(workspace: Workspace) -> None:
     if not json_write(workspace.config["db"], db):
         raise OSError(f"Failed to write DB config: {workspace.config['db']}")
 
-    fixfanout = json_read(workspace.config[f"{StepEnum.NETLIST_OPT.value}"])
-    if not fixfanout:
-        raise FileNotFoundError(
-            f"Netlist opt config missing or corrupt: "
-            f"{workspace.config[f'{StepEnum.NETLIST_OPT.value}']}"
-        )
     max_fanout = workspace.parameters.data.get("Max fanout", 32)
-    fixfanout["insert_buffer"] = workspace.pdk.buffers[0] if len(workspace.pdk.buffers) > 0 else ""
-    fixfanout["max_fanout"] = max_fanout
-    json_write(workspace.config[f"{StepEnum.NETLIST_OPT.value}"], fixfanout)
 
     filler_path = workspace.config[f"{StepEnum.FILLER.value}"]
     filler = json_read(filler_path)

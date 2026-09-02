@@ -1,5 +1,4 @@
 import glob
-import hashlib
 import importlib
 import json
 import os
@@ -17,6 +16,7 @@ from chipcompiler.tools.ecc.sta_qor import (
     STA_TIMING_PATHS_FILENAME,
     sta_artifact_directory,
 )
+from chipcompiler.utility import file_digest
 from chipcompiler.utility.filelist import (
     FILELIST_SUFFIXES,
     parse_filelist,
@@ -138,10 +138,16 @@ class SignoffPackageCollector:
 
         flow_path = workspace_dir / "home" / "flow.json"
         checklist_path = workspace_dir / "home" / "checklist.json"
-        flow_data = self.workspace.flow.data or self._read_json(flow_path)
+        if self.workspace.flow.path is None:
+            self.workspace.flow.path = flow_path
         checklist_data = self._read_json(checklist_path)
 
-        required_steps = self._required_step_states(flow_data)
+        has_synthesis = self.workspace.flow.has_step(StepEnum.SYNTHESIS)
+        synthesis_verilog = self._synthesis_output_verilog() if has_synthesis else None
+        lec_golden = synthesis_verilog or getattr(self.workspace.design, "origin_verilog", None)
+        filler_verilog = workspace_dir / "filler_ecc" / "output" / f"{design}_filler.v.gz"
+        require_lec = self._requires_post_route_lec(lec_golden, filler_verilog)
+        required_steps = self._required_step_states(require_lec=require_lec)
         for step_name, state in required_steps.items():
             if state != StateEnum.Success.value:
                 missing_required.append(f"flow step {step_name} is {state or 'missing'}")
@@ -159,7 +165,6 @@ class SignoffPackageCollector:
         config_dir = workspace_dir / "config"
         required_configs = {
             "db_ecc.json",
-            "flow_ecc.json",
             "rcx_ecc.json",
             "sta_ecc.json",
         }
@@ -199,19 +204,12 @@ class SignoffPackageCollector:
                     )
 
         db_config = self._read_json(config_dir / "db_ecc.json")
-        flow_starts_at_floorplan = self._flow_starts_at_floorplan(flow_data)
         configured_filelist = (
-            None
-            if flow_starts_at_floorplan
-            else getattr(self.workspace.design, "input_filelist", None)
+            None if not has_synthesis else getattr(self.workspace.design, "input_filelist", None)
         )
         origin_rtl = resolve_initial_rtl(
             configured_filelist,
-            (
-                None
-                if flow_starts_at_floorplan
-                else getattr(self.workspace.design, "origin_verilog", None)
-            ),
+            getattr(self.workspace.design, "origin_verilog", None),
             workspace_dir / "origin",
         )
         if origin_rtl is not None:
@@ -365,8 +363,7 @@ class SignoffPackageCollector:
             required=True,
         )
 
-        if not flow_starts_at_floorplan:
-            synthesis_verilog = self._synthesis_output_verilog()
+        if has_synthesis:
             add_file(
                 role="synthesis.verilog",
                 source=synthesis_verilog,
@@ -374,9 +371,68 @@ class SignoffPackageCollector:
                 required=True,
             )
 
+        lec_dir = workspace_dir / self._step_dirs()[StepEnum.POST_ROUTE_LEC.value]
+        lec_result = lec_dir / "output" / f"{design}_{StepEnum.POST_ROUTE_LEC.value}_result.json"
+        if require_lec:
+            add_file(
+                role="lec.result",
+                source=lec_result,
+                destination="final/reports/postRouteLec/result.json",
+                required=True,
+            )
+            add_file(
+                role="lec.equiv_status",
+                source=lec_dir / "report" / "equiv_status.rpt",
+                destination="final/reports/postRouteLec/report/equiv_status.rpt",
+                required=True,
+            )
+            add_file(
+                role="lec.status_report",
+                source=lec_dir / "report" / "run_lec_status.rpt",
+                destination="final/reports/postRouteLec/report/run_lec_status.rpt",
+                required=True,
+            )
+            add_file(
+                role="lec.failed_rtlil",
+                source=lec_dir / "report" / "equiv_failed.il",
+                destination="final/reports/postRouteLec/report/equiv_failed.il",
+            )
+            add_file(
+                role="lec.failed_verilog",
+                source=lec_dir / "report" / "equiv_failed.v",
+                destination="final/reports/postRouteLec/report/equiv_failed.v",
+            )
+            from chipcompiler.tools.yosys_lec.utility import lec_result_status
+
+            lec_status = lec_result_status(
+                lec_result,
+                golden_verilog=lec_golden,
+                gate_verilog=filler_verilog,
+            )
+            if lec_result.is_file() and lec_status != "proven":
+                missing_required.append("final/reports/postRouteLec/result.json")
+                issues.append(
+                    SignoffPackageIssue(
+                        kind="resource",
+                        label="lec.result",
+                        location=self._review_source_path(
+                            workspace_dir,
+                            lec_result,
+                            "final/reports/postRouteLec/result.json",
+                        ),
+                        reason=(
+                            "Yosys LEC proof is stale; golden or gate netlist changed"
+                            if lec_status == "stale"
+                            else "Yosys LEC did not prove equivalence"
+                        ),
+                        required=True,
+                        destination="final/reports/postRouteLec/result.json",
+                    )
+                )
+
         add_file(
             role="final.design.verilog",
-            source=workspace_dir / "filler_ecc" / "output" / f"{design}_filler.v.gz",
+            source=filler_verilog,
             destination=f"final/design/{design}.v.gz",
             required=True,
         )
@@ -494,6 +550,8 @@ class SignoffPackageCollector:
         add_file("status.flow", flow_path, "final/reports/flow.json", required=True)
 
         for step_name, step_dir in self._step_dirs().items():
+            if step_name == StepEnum.POST_ROUTE_LEC.value:
+                continue
             for kind in ("analysis", "report"):
                 self._copy_tree_files(
                     workspace_dir=workspace_dir,
@@ -587,7 +645,17 @@ class SignoffPackageCollector:
             "missing_optional": missing_optional,
             "warnings": warnings,
         }
-        if not flow_starts_at_floorplan:
+        if require_lec:
+            lec_payload = self._read_json(lec_result)
+            summary["lec"] = {
+                "status": lec_payload.get("status", ""),
+                "result": "final/reports/postRouteLec/result.json",
+                "equiv_status": "final/reports/postRouteLec/report/equiv_status.rpt",
+                "status_report": "final/reports/postRouteLec/report/run_lec_status.rpt",
+                "golden_verilog": lec_payload.get("golden_verilog", ""),
+                "gate_verilog": lec_payload.get("gate_verilog", ""),
+            }
+        if has_synthesis:
             summary["synthesis"] = {"verilog": f"synthesis/{design}.v.gz"}
         summary_path = package_dir / "summary.json"
 
@@ -616,10 +684,10 @@ class SignoffPackageCollector:
 
             readme_path = package_dir / "README.md"
             input_verilog_description = "- Mapped synthesis netlist is under `synthesis/`.\n"
-            if flow_starts_at_floorplan:
+            if not has_synthesis:
                 input_verilog_description = (
-                    "- Original imported RTL is under `initial/` because this flow "
-                    "starts at Floorplan.\n"
+                    "- Original imported netlist is under `initial/` because this flow "
+                    "has no Synthesis step.\n"
                 )
             readme_path.write_text(
                 f"# {design} Signoff Package\n\n"
@@ -628,6 +696,7 @@ class SignoffPackageCollector:
                 + input_verilog_description
                 + "- Harden outputs are under `harden/`.\n"
                 + "- Final physical resources are under `final/`.\n"
+                + "- Post-route LEC evidence is under `final/reports/postRouteLec/`.\n"
             )
 
             if options.archive and (ok or options.allow_incomplete):
@@ -700,7 +769,8 @@ class SignoffPackageCollector:
             else:
                 target.write_text(content, encoding="utf-8")
             size_bytes = target.stat().st_size
-            sha256 = self._sha256(target)
+            digest = file_digest(target)
+            sha256 = digest[0] if digest else None
         else:
             size_bytes = len(content.encode()) if content is not None else source.stat().st_size
             sha256 = None
@@ -804,13 +874,6 @@ class SignoffPackageCollector:
             return {}
         return data if isinstance(data, dict) else {}
 
-    def _sha256(self, path: Path) -> str:
-        digest = hashlib.sha256()
-        with open(path, "rb") as file:
-            for chunk in iter(lambda: file.read(1024 * 1024), b""):
-                digest.update(chunk)
-        return digest.hexdigest()
-
     def _path_from_config(self, workspace_dir: Path, path_text: str) -> Path | None:
         if not path_text:
             return None
@@ -876,7 +939,7 @@ class SignoffPackageCollector:
         verilog = getattr(output, "verilog", None)
         return Path(verilog) if verilog else None
 
-    def _required_step_states(self, flow_data: dict) -> dict:
+    def _required_step_states(self, *, require_lec: bool) -> dict:
         required = [
             StepEnum.HARDEN.value,
             StepEnum.RCX.value,
@@ -886,38 +949,31 @@ class SignoffPackageCollector:
             StepEnum.FILLER.value,
             StepEnum.ROUTING.value,
         ]
-        state_by_step = {
-            step.get("name"): step.get("state", "")
-            for step in flow_data.get("steps", [])
-            if isinstance(step, dict)
-        }
-        return {step: state_by_step.get(step, "") for step in required}
+        if require_lec:
+            required.append(StepEnum.POST_ROUTE_LEC.value)
+        states = {}
+        for step in required:
+            entry = self.workspace.flow.get_step(step)
+            states[step] = entry.get("state", "") if entry else ""
+        return states
 
-    def _flow_starts_at_floorplan(self, flow_data: dict) -> bool:
-        """Whether this workspace intentionally omits synthesis before Floorplan."""
-        steps = flow_data.get("steps", [])
-        if not isinstance(steps, list):
+    def _requires_post_route_lec(
+        self,
+        golden_verilog: Path | None,
+        filler_verilog: Path | None,
+    ) -> bool:
+        if golden_verilog is None or not Path(golden_verilog).is_file():
             return False
-        first_step = next(
-            (step for step in steps if isinstance(step, dict) and step.get("name")),
-            None,
-        )
-        return bool(
-            first_step
-            and str(first_step.get("name", "")).strip().lower() == StepEnum.FLOORPLAN.value.lower()
-        )
+        return bool(filler_verilog and Path(filler_verilog).is_file())
 
     def _refresh_workspace_analysis(self, workspace_dir: Path) -> list[SignoffPackageIssue]:
         """Rebuild current V3 analysis and checklist snapshots for completed steps."""
-        flow_data = self.workspace.flow.data or self._read_json(
-            workspace_dir / "home" / "flow.json"
-        )
+        if self.workspace.flow.path is None:
+            self.workspace.flow.path = workspace_dir / "home" / "flow.json"
         issues: list[SignoffPackageIssue] = []
         previous_step = None
 
-        for flow_step in flow_data.get("steps", []):
-            if not isinstance(flow_step, dict):
-                continue
+        for flow_step in self.workspace.flow.steps():
             step_name = str(flow_step.get("name", ""))
             tool = str(flow_step.get("tool", ""))
             if not step_name or not tool:
@@ -945,8 +1001,11 @@ class SignoffPackageCollector:
             ):
                 workspace_step.output.spef = previous_step.output.spef
 
-            previous_step = workspace_step
+            if tool != "yosys_lec":
+                previous_step = workspace_step
             if flow_step.get("state") != StateEnum.Success.value:
+                continue
+            if tool == "yosys_lec":
                 continue
 
             try:
@@ -1211,7 +1270,6 @@ class SignoffPackageCollector:
         return {
             StepEnum.SYNTHESIS.value: "Synthesis_yosys",
             StepEnum.FLOORPLAN.value: "Floorplan_ecc",
-            StepEnum.NETLIST_OPT.value: "fixFanout_ecc",
             StepEnum.PLACEMENT.value: "place_dreamplace",
             StepEnum.CTS.value: "CTS_ecc",
             StepEnum.LEGALIZATION.value: "legalization_dreamplace",
@@ -1219,6 +1277,7 @@ class SignoffPackageCollector:
             StepEnum.DRC.value: "drc_ecc",
             StepEnum.LVS.value: "lvs_ecc",
             StepEnum.FILLER.value: "filler_ecc",
+            StepEnum.POST_ROUTE_LEC.value: "postRouteLec_yosys_lec",
             StepEnum.RCX.value: "RCX_ecc",
             StepEnum.STA.value: "sta_ecc",
             StepEnum.HARDEN.value: "Harden_ecc",

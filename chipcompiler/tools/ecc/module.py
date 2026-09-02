@@ -97,12 +97,8 @@ class ECCToolsModule:
     ########################################################################
     # config api
     ########################################################################
-    def init_config(
-        self, flow_config: str, db_config: str, output_dir: PathArg, feature_dir: PathArg
-    ):
+    def init_config(self, db_config: str, output_dir: PathArg, feature_dir: PathArg):
         """init_config"""
-        self.ecc.flow_init(flow_config=path_text(flow_config))
-
         self.ecc.db_init(
             config_path=path_text(db_config),
             output_path=path_text(output_dir),
@@ -850,12 +846,6 @@ class ECCToolsModule:
 
     def eval_overflow(self):
         return self.ecc.eval_overflow()
-
-    ########################################################################
-    # net optimization
-    ########################################################################
-    def run_net_opt(self, config: str):
-        return self.ecc.fix_fanout(path_text(config))
 
     def build_rc_tree_from_flat_data(
         self,

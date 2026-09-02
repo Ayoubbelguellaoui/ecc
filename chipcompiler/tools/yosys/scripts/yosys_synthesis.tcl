@@ -470,6 +470,10 @@ select -write ${timing_cell_stat_rpt} t:*DFF*
 tee -q -o ${timing_cell_count_rpt} select -count t:*DFF*
 tee -q -a ${timing_cell_count_rpt} select -count */t:*_DLATCH*_ */t:*_SR*_
 
+if {[info exists golden_netlist_file] && $golden_netlist_file ne ""} {
+    yosys write_verilog -noattr -noexpr -nohex -nodec ${golden_netlist_file}
+}
+
 # technology mapping for clockgate
 clockgate {*}$tech_cells_args {*}$exclude_cells
 
@@ -630,7 +634,7 @@ autoname
 write_verilog -attr2comment -noexpr -nohex -nodec -defparam ${final_netlist_sim_file}
 
 # splitting nets resolves unwanted compound assign statements in netlist (assign {..} = {..}
-splitnets -format __v -ports
+splitnets -format _ -ports
 
 # remove unused cells and wires
 opt_clean -purge

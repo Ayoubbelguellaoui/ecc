@@ -31,7 +31,6 @@ from chipcompiler.utility import json_read
 _GEOMETRY_SNAPSHOT_STEPS = frozenset(
     {
         StepEnum.FLOORPLAN.value,
-        StepEnum.NETLIST_OPT.value,
         StepEnum.PLACEMENT.value,
         StepEnum.CTS.value,
         StepEnum.TIMING_OPT.value,
@@ -183,21 +182,29 @@ def _existing_input_path(path: Path | None) -> str | None:
     return None
 
 
-def create_db_engine(workspace: Workspace, step: WorkspaceStep) -> ECCToolsModule:
-    """"""
+def create_db_engine(workspace: Workspace, step: WorkspaceStep) -> ECCToolsModule | None:
+    """Load an ECC engine from the step input."""
 
-    def load_data():
+    def _close_engine(ecc_module: ECCToolsModule | None) -> None:
+        if ecc_module is None:
+            return
+        close = getattr(ecc_module, "close", None)
+        if callable(close):
+            close()
+
+    def load_data() -> ECCToolsModule | None:
         ecc_module = ECCToolsModule()
+        keep = False
+        try:
+            ecc_module.init_config(
+                db_config=workspace.config.get("db"),
+                output_dir=step.data.dir,
+                feature_dir=step.feature.dir,
+            )
 
-        ecc_module.init_config(
-            flow_config=workspace.config.get("flow"),
-            db_config=workspace.config.get("db"),
-            output_dir=step.data.dir,
-            feature_dir=step.feature.dir,
-        )
-
-        db_path = step.input.db or ""
-        if ecc_module.is_db_data_exists(db_path):
+            db_path = step.input.db or ""
+            if not ecc_module.is_db_data_exists(db_path):
+                return None
             try:
                 loaded = ecc_module.load_data(path=db_path)
             except Exception as e:
@@ -213,50 +220,49 @@ def create_db_engine(workspace: Workspace, step: WorkspaceStep) -> ECCToolsModul
                 return None
 
             workspace.logger.info(f"Successfully loaded data from {db_path}")
+            keep = True
             return ecc_module
-        else:
-            return None
+        finally:
+            if not keep:
+                _close_engine(ecc_module)
 
-    def load_design():
-        def def_exist() -> str | None:
-            return _existing_input_path(step.input.def_)
-
-        def verilog_exist() -> str | None:
-            return _existing_input_path(step.input.verilog)
-
+    def load_design() -> ECCToolsModule | None:
         ecc_module = ECCToolsModule()
+        keep = False
+        try:
+            ecc_module.init_config(
+                db_config=workspace.config.get("db"),
+                output_dir=step.data.dir,
+                feature_dir=step.feature.dir,
+            )
 
-        ecc_module.init_config(
-            flow_config=workspace.config.get("flow"),
-            db_config=workspace.config.get("db"),
-            output_dir=step.data.dir,
-            feature_dir=step.feature.dir,
-        )
+            ecc_module.init_techlef(workspace.pdk.tech)
+            ecc_module.init_lefs(workspace.pdk.lefs)
 
-        ecc_module.init_techlef(workspace.pdk.tech)
-        ecc_module.init_lefs(workspace.pdk.lefs)
+            def_path = _existing_input_path(step.input.def_)
+            verilog_path = _existing_input_path(step.input.verilog)
 
-        # if db def exist, read db def
-        def_path = def_exist()
-        verilog_path = verilog_exist()
-
-        if step.name == StepEnum.LVS.value:
-            if def_path is None:
+            if step.name == StepEnum.LVS.value:
+                if def_path is None or not ecc_module.read_def(def_path):
+                    return None
+            elif def_path is not None:
+                if not ecc_module.read_def(def_path):
+                    return None
+            elif verilog_path:
+                ecc_module.read_verilog(
+                    verilog=verilog_path,
+                    top_module=workspace.design.top_module,
+                )
+            else:
                 return None
-            if not ecc_module.read_def(def_path):
-                return None
-        elif def_path is not None:
-            ecc_module.read_def(def_path)
-        elif verilog_path:
-            # else, read step output verilog
-            ecc_module.read_verilog(verilog=verilog_path, top_module=workspace.design.top_module)
-        else:
-            return None
 
-        return ecc_module
+            keep = True
+            return ecc_module
+        finally:
+            if not keep:
+                _close_engine(ecc_module)
 
-    def is_enable_setup():
-        # skip synthesis step
+    def is_enable_setup() -> bool:
         if step.name == StepEnum.SYNTHESIS.value:
             return False
 
@@ -267,14 +273,18 @@ def create_db_engine(workspace: Workspace, step: WorkspaceStep) -> ECCToolsModul
 
     if not is_eda_exist() or not is_enable_setup():
         return None
+
+    if step.name == StepEnum.LVS.value or not step.input.db:
+        return load_design()
+
+    ecc_module = None
     try:
-        ecc_module = None if step.name == StepEnum.LVS.value else load_data()
-        if ecc_module is None:
-            ecc_module = load_design()
+        ecc_module = load_data()
     except Exception as e:
         workspace.logger.warning("Failed to load ECC data; falling back to design input: %s", e)
+        ecc_module = None
+    if ecc_module is None:
         ecc_module = load_design()
-
     return ecc_module
 
 
@@ -350,7 +360,6 @@ def run_sta_without_spef(
         if ecc_module is None:
             ecc_module = ECCToolsModule()
             ecc_module.init_config(
-                flow_config=workspace.config.get("flow", ""),
                 db_config=workspace.config.get("db", ""),
                 output_dir=step.data.dir or "",
                 feature_dir=step.feature.dir or "",
@@ -487,8 +496,6 @@ def run_step(workspace: Workspace, step: EccStep, ecc_module: ECCToolsModule | N
     match step.name:
         case StepEnum.FLOORPLAN.value:
             state = run_floorplan(workspace=workspace, step=step, ecc_module=ecc_module)
-        case StepEnum.NETLIST_OPT.value:
-            state = run_net_opt(workspace=workspace, step=step, ecc_module=ecc_module)
         case StepEnum.CTS.value:
             state = run_cts(workspace=workspace, step=step, ecc_module=ecc_module)
         case StepEnum.ROUTING.value:
@@ -521,42 +528,6 @@ def run_analysis(workspace: Workspace, step: EccStep, subflow: EccSubFlow):
     # do checklist
     checklist = EccChecklist(workspace=workspace, workspace_step=step)
     checklist.check()
-
-
-def run_net_opt(
-    workspace: Workspace, step: EccStep, ecc_module: ECCToolsModule | None = None
-) -> bool:
-    """
-    run net optimization
-    """
-    reslut = False
-
-    sub_flow = EccSubFlow(workspace=workspace, workspace_step=step)
-
-    ecc_module = get_eda_instance(workspace=workspace, step=step, ecc_module=ecc_module)
-    if ecc_module is not None:
-        sub_flow.update_step(step_name=EccSubFlowEnum.load_data.value, state=StateEnum.Success)
-
-        clock_name = workspace.parameters.data.get("Clock", "")
-        if clock_name:
-            ecc_module.set_net(net_name=clock_name, net_type="CLOCK")
-            sub_flow.update_step(
-                step_name=EccSubFlowEnum.set_clock_net.value, state=StateEnum.Success
-            )
-
-        ecc_module.run_net_opt(config=workspace.config.get(f"{StepEnum.NETLIST_OPT.value}"))
-
-        sub_flow.update_step(
-            step_name=EccSubFlowEnum.run_net_optimization.value, state=StateEnum.Success
-        )
-
-        reslut = save_data(workspace=workspace, step=step, ecc_module=ecc_module)
-
-        sub_flow.update_step(step_name=EccSubFlowEnum.save_data.value, state=StateEnum.Success)
-
-        run_analysis(workspace=workspace, step=step, subflow=sub_flow)
-
-    return reslut
 
 
 def run_cts(workspace: Workspace, step: EccStep, ecc_module: ECCToolsModule | None = None) -> bool:

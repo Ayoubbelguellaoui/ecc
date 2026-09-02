@@ -164,7 +164,6 @@ class TestConfigStepResolved:
         create_workspace_config(
             run_dir,
             {
-                "flow_ecc.json": "{}",
                 "db_ecc.json": "{}",
                 "cts_ecc.json": "{}",
             },
@@ -175,7 +174,6 @@ class TestConfigStepResolved:
         out = capsys.readouterr().out
         assert "step:" in out or "cts" in out
         assert "step:" in out or "step:" in out
-        assert "runs/default/config/flow_ecc.json" in out
         assert "runs/default/config/db_ecc.json" in out
         assert "cts_ecc.json" in out
 
@@ -198,7 +196,6 @@ class TestConfigStepResolved:
         create_workspace_config(
             run_dir,
             {
-                "flow_ecc.json": "{}",
                 "db_ecc.json": "{}",
                 "cts_ecc.json": "{}",
             },
@@ -213,7 +210,6 @@ class TestConfigStepResolved:
         assert all(item["step"] == "cts" for item in records)
         assert all(item["source"] == "workspace_config" for item in records)
         assert [item["path"] for item in records] == [
-            "runs/default/config/flow_ecc.json",
             "runs/default/config/db_ecc.json",
             "runs/default/config/cts_ecc.json",
         ]
@@ -301,6 +297,49 @@ class TestConfigStepResolved:
         ]
         assert data["records"][0]["source"] == "workspace_config"
 
+    def test_config_sizer_timing_opt_uses_db_and_dreamplace_configs(
+        self,
+        tmp_path,
+        capsys,
+        create_cli_project,
+        create_flow_json,
+        create_step_dir,
+        create_workspace_config,
+    ):
+        project_dir = create_cli_project()
+        run_dir = os.path.join(project_dir, "runs", "default")
+        create_flow_json(
+            run_dir,
+            [
+                {
+                    "name": "Timing optimization",
+                    "tool": "sizer",
+                    "state": "Success",
+                    "runtime": "0:00:04",
+                },
+            ],
+        )
+        create_step_dir(run_dir, "Timing optimization", "sizer", subdirs=["output"])
+        create_workspace_config(
+            run_dir,
+            {
+                "db_ecc.json": "{}",
+                "dreamplace_ecc.json": "{}",
+            },
+        )
+
+        rc = cli_main.run(
+            ["config", "timing optimization", "--resolved", "--json", "--project", project_dir]
+        )
+        assert rc == 0
+        data = json.loads(capsys.readouterr().out)
+        assert [item["path"] for item in data["records"]] == [
+            "runs/default/config/db_ecc.json",
+            "runs/default/config/dreamplace_ecc.json",
+        ]
+        assert all(item["source"] == "workspace_config" for item in data["records"])
+        assert all(item["step"] == "timing optimization" for item in data["records"])
+
     def test_config_cli_tokens_use_internal_flow_step_names(
         self,
         capsys,
@@ -336,7 +375,6 @@ class TestConfigStepResolved:
             assert rc == 0
             data = json.loads(capsys.readouterr().out)
             expected = [
-                "runs/default/config/flow_ecc.json",
                 "runs/default/config/db_ecc.json",
             ]
             if step_config:
@@ -370,7 +408,6 @@ class TestConfigStepResolved:
         create_workspace_config(
             run_dir,
             {
-                "flow_ecc.json": "{}",
                 "db_ecc.json": "{}",
                 "rcx_ecc.json": "{}",
                 "sta_ecc.json": "{}",
@@ -381,14 +418,13 @@ class TestConfigStepResolved:
         assert rc == 0
         data = json.loads(capsys.readouterr().out)
         assert [item["path"] for item in data["records"]] == [
-            "runs/default/config/flow_ecc.json",
             "runs/default/config/db_ecc.json",
             "runs/default/config/rcx_ecc.json",
             "runs/default/config/sta_ecc.json",
         ]
         assert all(item["source"] == "workspace_config" for item in data["records"])
 
-    def test_config_yosys_synthesis_does_not_report_ieda_flow_config(
+    def test_config_yosys_synthesis_does_not_report_ecc_workspace_configs(
         self,
         tmp_path,
         capsys,
@@ -411,7 +447,7 @@ class TestConfigStepResolved:
             ],
         )
         create_step_dir(run_dir, "Synthesis", "yosys", subdirs=["output"])
-        create_workspace_config(run_dir, {"flow_ecc.json": "{}"})
+        create_workspace_config(run_dir, {"db_ecc.json": "{}"})
 
         rc = cli_main.run(["config", "synthesis", "--resolved", "--json", "--project", project_dir])
         assert rc == 0
@@ -480,7 +516,6 @@ class TestDirectoryOnlyStepConfig:
         assert rc == 0
         data = json.loads(capsys.readouterr().out)
         assert [item["path"] for item in data["records"]] == [
-            "runs/default/config/flow_ecc.json",
             "runs/default/config/db_ecc.json",
             "runs/default/config/cts_ecc.json",
         ]
@@ -508,7 +543,6 @@ class TestDirectoryOnlyStepConfig:
         assert rc == 0
         data = json.loads(capsys.readouterr().out)
         assert [item["path"] for item in data["records"]] == [
-            "runs/default/config/flow_ecc.json",
             "runs/default/config/db_ecc.json",
             "runs/default/config/route_ecc.json",
         ]

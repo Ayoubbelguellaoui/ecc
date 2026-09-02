@@ -2,7 +2,7 @@
 
 ## 安装
 
-请确保已按 **[README](../../../README.cn.md#安装所有依赖)** 中的说明安装所有依赖。
+请确保已按 **[README](../../../README.cn.md#安装)** 中的说明安装 ECC。
 
 ## 使用示例
 
@@ -68,9 +68,6 @@ gcd_workspace/
 ├── filler_ecc
 │   ...
 │   └── script
-├── fixFanout_ecc
-│   ...
-│   └── script
 ├── Floorplan_ecc
 │   ...
 │   └── script
@@ -105,7 +102,6 @@ if not engine_flow.has_init():
     # 使用 `add_step` 将步骤加入流程
     engine_flow.add_step(step=StepEnum.SYNTHESIS, tool="Yosys", state=StateEnum.Unstart)
     engine_flow.add_step(step=StepEnum.FLOORPLAN, tool="ecc", state=StateEnum.Unstart)
-    engine_flow.add_step(step=StepEnum.NETLIST_OPT, tool="ecc", state=StateEnum.Unstart)
     engine_flow.add_step(step=StepEnum.PLACEMENT, tool="ecc", state=StateEnum.Unstart)
     engine_flow.add_step(step=StepEnum.CTS, tool="ecc", state=StateEnum.Unstart)
     engine_flow.add_step(step=StepEnum.LEGALIZATION, tool="ecc", state=StateEnum.Unstart)
@@ -122,8 +118,7 @@ engine_flow.run_steps()
 ```mermaid
 graph LR
     A[Synthesis<br/>Yosys] --> B[Floorplan<br/>ECC-Tools]
-    B --> C[Netlist Opt<br/>ECC-Tools]
-    C --> D[Placement<br/>ECC-Tools]
+    B --> C[Placement<br/>ECC-Tools]
     D --> E[CTS<br/>ECC-Tools]
     E --> F[Legalization<br/>ECC-Tools]
     F --> G[Routing<br/>ECC-Tools]

@@ -105,7 +105,7 @@ Routing → input/design.def → ...
 | `WorkspaceStep` | Per-step workspace: inputs, outputs, configs, logs, reports |
 | `Parameters` | Design specs: die size, clock frequency, buffer/filler/tie cells |
 | `PDK` | Tech library paths: LEF, liberty, timing, SPEF |
-| `StepEnum` | Flow steps: SYNTHESIS, NETLIST_OPT, PLACEMENT, CTS, TIMING_OPT (sizer), LEGALIZATION, ROUTING, FILLER |
+| `StepEnum` | Flow steps: SYNTHESIS, PLACEMENT, CTS, LEGALIZATION, TIMING_OPT (sizer + inner legalize), ROUTING, FILLER |
 | `StateEnum` | Step states: Unstart, Ongoing, Success, Incomplete, Invalid, Ignored, Pending |
 
 ### Engine Layer (chipcompiler/engine/)
@@ -143,7 +143,7 @@ tool_name/
 - Tool name: `"ecc"` (e.g., `add_step(StepEnum.PLACEMENT, tool="ecc")`)
 - Source: `chipcompiler/thirdparty/ecc-tools` (C++ engine)
 - Wrapper: `chipcompiler/tools/ecc/` (Python integration)
-- Operations: netlist optimization, placement, CTS, timing optimization, legalization, routing, filler
+- Operations: placement, CTS, timing optimization, legalization, routing, filler
 - I/O: DEF/Verilog, PDK LEF/liberty, SDC
 - Runtime deps bundled in `bin/lib/` with RPATH `$ORIGIN:$ORIGIN/lib` for portability
 
@@ -160,7 +160,9 @@ Script `scripts/autopatch-ecc-py.sh` collects `.so` dependencies, copies to `bin
 
 ### RTL2GDS Layer (chipcompiler/rtl2gds/)
 
-`build_rtl2gds_flow()` returns complete flow: SYNTHESIS → FLOORPLAN → NETLIST_OPT → PLACEMENT → CTS → LEGALIZATION → ROUTING → DRC → FILLER.
+`build_rtl2gds_flow()` returns complete flow: SYNTHESIS → FLOORPLAN → PLACEMENT → CTS → LEGALIZATION → TIMING_OPT → ROUTING → DRC → FILLER.
+
+Timing Opt (`TIMING_OPT`, tool `sizer`) sits **after legalization and before routing**. CTS dirties legality, so the post-CTS `legalization` sibling still runs first. Sizer then sizes cells and Timing Opt legalizes internally before publishing DEF/Verilog. Missing Sizer does not prevent building the rest of the flow; the Timing Opt step is marked Invalid and later steps still chain from its declared outputs.
 
 ### Benchmark Module (benchmark/)
 
