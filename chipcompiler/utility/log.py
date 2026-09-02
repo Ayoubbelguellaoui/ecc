@@ -179,13 +179,27 @@ def redirect_stdio_to_file(log_file: str) -> _StdioRedirect:
 
 @contextmanager
 def capture_stdio_to_file(log_file: str | None):
-    """Redirect fd 1/2 for one scope, then restore the original streams."""
+    """Redirect fd 1/2 for one scope, then restore the original streams.
+
+    Yields True when capture succeeded, False when setup failed (bad path,
+    permissions, etc.).  Callers that need Incomplete on capture failure
+    should check the flag.
+    """
     if not log_file:
-        yield
+        yield True
         return
 
-    with _StdioRedirect(log_file):
-        yield
+    redirect = _StdioRedirect(log_file)
+    try:
+        redirect.__enter__()
+    except Exception:
+        yield False
+        return
+    try:
+        yield True
+    finally:
+        with suppress(Exception):
+            redirect.__exit__(None, None, None)
 
 
 def init_api_runtime_log(

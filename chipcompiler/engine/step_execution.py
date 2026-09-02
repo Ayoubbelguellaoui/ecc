@@ -73,22 +73,25 @@ def execute_tool_step(
         if observer is not None:
             workspace._runtime_flow_observer = observer
             observer_installed = True
-        with capture_stdio_to_file(log_file):
-            try:
-                from chipcompiler.tools import run_step
+        with capture_stdio_to_file(log_file) as capture_ok:
+            if not capture_ok:
+                step_error = f"{step_tag} step log path is unusable: {log_file}"
+            else:
+                try:
+                    from chipcompiler.tools import run_step
 
-                if engine_db is None:
-                    raise AttributeError("'NoneType' object has no attribute 'engine'")
-                result = run_step(
-                    workspace=workspace,
-                    step=workspace_step,
-                    ecc_module=engine_db.engine,
-                )
-                workspace.logger.info(f"[STEP] {step_tag} finished result={result}")
-            except (Exception, SystemExit) as exc:
-                step_error = record_tool_failure(
-                    workspace.logger, step_tag, exc, step_log_file=log_file
-                )
+                    if engine_db is None:
+                        raise AttributeError("'NoneType' object has no attribute 'engine'")
+                    result = run_step(
+                        workspace=workspace,
+                        step=workspace_step,
+                        ecc_module=engine_db.engine,
+                    )
+                    workspace.logger.info(f"[STEP] {step_tag} finished result={result}")
+                except (Exception, SystemExit) as exc:
+                    step_error = record_tool_failure(
+                        workspace.logger, step_tag, exc, step_log_file=log_file
+                    )
     except (Exception, SystemExit) as exc:
         failure_message = record_tool_failure(
             workspace.logger, step_tag, exc, step_log_file=log_file
@@ -141,9 +144,14 @@ def record_tool_failure(
     tool_logger.error(f"[STEP] {step_tag} failed: {message}")
     tool_logger.exception(f"[STEP] {step_tag} exception details")
     if step_log_file:
-        tool_logger.write_to_file(step_log_file, f"[STEP] {step_tag} failed: {message}")
-        tb_text = "".join(_traceback_mod.format_exception(type(error), error, error.__traceback__))
-        tool_logger.write_to_file(step_log_file, tb_text)
+        try:
+            tool_logger.write_to_file(step_log_file, f"[STEP] {step_tag} failed: {message}")
+            tb_text = "".join(
+                _traceback_mod.format_exception(type(error), error, error.__traceback__)
+            )
+            tool_logger.write_to_file(step_log_file, tb_text)
+        except Exception:
+            pass
     return message
 
 

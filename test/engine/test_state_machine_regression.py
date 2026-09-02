@@ -486,3 +486,136 @@ def test_agent_exception_traceback_lands_in_step_log(tmp_path, monkeypatch):
         isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler)
         for h in workspace.logger.logger.handlers
     )
+
+
+def test_agent_flow_unusable_log_path_ends_incomplete(tmp_path, monkeypatch):
+    """AgentEngineFlow: unusable step-log path (a directory) must not abort execution."""
+    import agent.engine as agent_engine
+
+    step_dir = tmp_path / "Floorplan_ecc"
+    step_dir.mkdir()
+
+    workspace = Workspace(directory=tmp_path, flow=Flow(path=tmp_path / "flow.json"))
+    workspace.flow.data = {
+        "steps": [
+            {
+                "name": "Floorplan",
+                "tool": "ecc",
+                "state": StateEnum.Unstart.value,
+                "runtime": "",
+                "peak memory (mb)": 0,
+                "info": {},
+            }
+        ]
+    }
+    workspace.logger = Logger()
+
+    agent_flow = agent_engine.AgentEngineFlow.__new__(agent_engine.AgentEngineFlow)
+    agent_flow.workspace = workspace
+    agent_flow.workspace_steps = [
+        EccStep(
+            name="Floorplan",
+            tool="ecc",
+            directory=step_dir,
+            output=EccOutput(verilog=step_dir / "design.v"),
+            log=LogPaths(file=tmp_path),  # directory — open() raises IsADirectoryError
+        )
+    ]
+    agent_flow.engine_db = SimpleNamespace(engine=None)
+
+    monkeypatch.setattr(agent_engine, "run_agent_step", lambda **_kw: True)
+    monkeypatch.setattr(agent_flow, "check_step_result", lambda **_kw: True)
+
+    result = agent_flow.run_step(agent_flow.workspace_steps[0], rerun=False)
+
+    assert result == StateEnum.Imcomplete
+
+    persisted = json.loads((tmp_path / "flow.json").read_text())
+    assert persisted["steps"][0]["state"] != StateEnum.Ongoing.value
+
+    assert any(
+        isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler)
+        for h in workspace.logger.logger.handlers
+    )
+
+
+def test_agent_flow_step_failure_not_silently_swallowed(tmp_path, monkeypatch):
+    """AgentEngineFlow: run_agent_step() failure must not be swallowed."""
+    import agent.engine as agent_engine
+
+    log_file = tmp_path / "agent_step.log"
+    step_dir = tmp_path / "Floorplan_ecc"
+    step_dir.mkdir()
+
+    workspace = Workspace(directory=tmp_path, flow=Flow(path=tmp_path / "flow.json"))
+    workspace.flow.data = {
+        "steps": [
+            {
+                "name": "Floorplan",
+                "tool": "ecc",
+                "state": StateEnum.Unstart.value,
+                "runtime": "",
+                "peak memory (mb)": 0,
+                "info": {},
+            }
+        ]
+    }
+    workspace.logger = Logger()
+
+    agent_flow = agent_engine.AgentEngineFlow.__new__(agent_engine.AgentEngineFlow)
+    agent_flow.workspace = workspace
+    agent_flow.workspace_steps = [
+        EccStep(
+            name="Floorplan",
+            tool="ecc",
+            directory=step_dir,
+            output=EccOutput(verilog=step_dir / "design.v"),
+            log=LogPaths(file=log_file),
+        )
+    ]
+    agent_flow.engine_db = SimpleNamespace(engine=None)
+
+    def _raise(**_kw):
+        raise RuntimeError("tool crashed")
+
+    monkeypatch.setattr(agent_engine, "run_agent_step", _raise)
+
+    result = agent_flow.run_step(agent_flow.workspace_steps[0], rerun=False)
+
+    assert result == StateEnum.Imcomplete
+
+    persisted = json.loads((tmp_path / "flow.json").read_text())
+    assert persisted["steps"][0]["state"] != StateEnum.Ongoing.value
+
+    assert any(
+        isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler)
+        for h in workspace.logger.logger.handlers
+    )
+
+
+def test_engine_flow_unusable_log_path_ends_incomplete(tmp_path, monkeypatch):
+    """EngineFlow: unusable step-log path must not abort execution."""
+    flow = _make_resume_workspace(
+        tmp_path,
+        [("Floorplan", "Unstart")],
+    )
+    flow.workspace.logger = Logger()
+
+    # Point log file to a directory — open() will raise IsADirectoryError
+    flow.workspace_steps[0] = EccStep(
+        name="Floorplan",
+        tool="ecc",
+        directory=flow.workspace_steps[0].directory,
+        output=flow.workspace_steps[0].output,
+        log=LogPaths(file=tmp_path),
+    )
+
+    monkeypatch.setattr(tools, "run_step", lambda **_kw: True)
+    monkeypatch.setattr(flow, "check_step_result", lambda **_kw: True)
+
+    result = flow.run_step(flow.workspace_steps[0], rerun=False)
+
+    assert result == StateEnum.Imcomplete
+
+    persisted = json.loads((tmp_path / "home" / "flow.json").read_text())
+    assert persisted["steps"][0]["state"] != StateEnum.Ongoing.value

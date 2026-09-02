@@ -45,21 +45,28 @@ class AgentEngineFlow(EngineFlow):
         start_memory, peak_memory, stop_monitor, monitor = self._start_memory_monitor()
         result = False
         try:
-            with capture_stdio_to_file(workspace_step.log.file or ""):
-                try:
-                    result = run_agent_step(
-                        workspace=self.workspace,
-                        step=workspace_step,
-                        ecc_module=self.engine_db.engine,
-                    )
-                    self.workspace.logger.info("[STEP] %s finished result=%s", step_tag, result)
-                except Exception as exc:
-                    record_tool_failure(
-                        self.workspace.logger,
+            with capture_stdio_to_file(workspace_step.log.file or "") as capture_ok:
+                if not capture_ok:
+                    self.workspace.logger.error(
+                        "[STEP] %s step log path is unusable: %s",
                         step_tag,
-                        exc,
-                        step_log_file=workspace_step.log.file or "",
+                        workspace_step.log.file,
                     )
+                else:
+                    try:
+                        result = run_agent_step(
+                            workspace=self.workspace,
+                            step=workspace_step,
+                            ecc_module=self.engine_db.engine,
+                        )
+                        self.workspace.logger.info("[STEP] %s finished result=%s", step_tag, result)
+                    except Exception as exc:
+                        record_tool_failure(
+                            self.workspace.logger,
+                            step_tag,
+                            exc,
+                            step_log_file=workspace_step.log.file or "",
+                        )
         finally:
             self._stop_memory_monitor(stop_monitor, monitor)
 
