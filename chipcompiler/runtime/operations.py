@@ -272,6 +272,7 @@ class RuntimeOperationManager:
             operation.updated_at = time.time()
             started_event = self._new_event_locked(operation, "operation.started", {})
         observer = RuntimeFlowObserver(self, operation_id)
+        event = None
         try:
             self._publish(started_event)
             try:
@@ -288,7 +289,7 @@ class RuntimeOperationManager:
                         "operation.completed",
                         {"result": result},
                     )
-                self._cleanup_workspace_active(operation_id)
+                    self._cleanup_workspace_active(operation_id)
             except RuntimeOperationCancelled as exc:
                 with self._lock:
                     operation = self._operations[operation_id]
@@ -308,7 +309,7 @@ class RuntimeOperationManager:
                         event_type,
                         {"error": operation.error},
                     )
-                self._cleanup_workspace_active(operation_id)
+                    self._cleanup_workspace_active(operation_id)
             except Exception as exc:
                 with self._lock:
                     operation = self._operations[operation_id]
@@ -334,7 +335,24 @@ class RuntimeOperationManager:
                             }
                         )
                     event = self._new_event_locked(operation, event_type, payload)
-                self._cleanup_workspace_active(operation_id)
+                    self._cleanup_workspace_active(operation_id)
+            except BaseException as exc:
+                with self._lock:
+                    operation = self._operations[operation_id]
+                    operation.state = "failed"
+                    operation.error = operation.error or {
+                        "message": f"{type(exc).__name__}: {exc}",
+                        "code": "unhandled_exception",
+                    }
+                    operation.updated_at = time.time()
+                    event = self._new_event_locked(
+                        operation,
+                        "operation.failed",
+                        {"error": operation.error},
+                    )
+                    self._cleanup_workspace_active(operation_id)
+                self._publish(event)
+                raise
             self._publish(event)
         finally:
             self._stop_step_log_tail(operation_id)
