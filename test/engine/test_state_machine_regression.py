@@ -14,7 +14,15 @@ from types import SimpleNamespace
 import pytest
 
 from chipcompiler import tools
-from chipcompiler.data import EccOutput, EccStep, LogPaths, OriginDesign, StateEnum, StepEnum, Workspace
+from chipcompiler.data import (
+    EccOutput,
+    EccStep,
+    LogPaths,
+    OriginDesign,
+    StateEnum,
+    StepEnum,
+    Workspace,
+)
 from chipcompiler.data.workspace import Flow
 from chipcompiler.engine.flow import _VALID_TRANSITIONS, EngineFlow
 from chipcompiler.tools.ecc.runner import EccDesignReadError
@@ -659,6 +667,8 @@ def test_engine_flow_unusable_log_path_ends_incomplete(tmp_path, monkeypatch):
 
     persisted = json.loads((tmp_path / "home" / "flow.json").read_text())
     assert persisted["steps"][0]["state"] != StateEnum.Ongoing.value
+
+
 class TestRunStepsLedgerCompleteness:
     """run_steps verifies full-ledger coverage by default; callers binding
     execution to a reconciled range narrower than the persisted ledger opt
