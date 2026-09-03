@@ -45,6 +45,10 @@ _GEOMETRY_SNAPSHOT_STEPS = frozenset(
 )
 
 
+class EccDesignReadError(RuntimeError):
+    """Raised when ECC cannot construct a database from a design input."""
+
+
 def temperature_token(temperature) -> str:
     try:
         numeric = float(temperature)
@@ -226,6 +230,16 @@ def create_db_engine(workspace: Workspace, step: WorkspaceStep) -> ECCToolsModul
             if not keep:
                 _close_engine(ecc_module)
 
+    def require_design_read(input_kind: str, input_path: str, reader) -> None:
+        try:
+            read_ok = reader()
+        except Exception as error:
+            raise EccDesignReadError(
+                f"ECC failed to read {input_kind} input: {input_path}"
+            ) from error
+        if not read_ok:
+            raise EccDesignReadError(f"ECC failed to read {input_kind} input: {input_path}")
+
     def load_design() -> ECCToolsModule | None:
         ecc_module = ECCToolsModule()
         keep = False
@@ -243,15 +257,18 @@ def create_db_engine(workspace: Workspace, step: WorkspaceStep) -> ECCToolsModul
             verilog_path = _existing_input_path(step.input.verilog)
 
             if step.name == StepEnum.LVS.value:
-                if def_path is None or not ecc_module.read_def(def_path):
+                if def_path is None:
                     return None
+                require_design_read("DEF", def_path, lambda: ecc_module.read_def(def_path))
             elif def_path is not None:
-                if not ecc_module.read_def(def_path):
-                    return None
+                require_design_read("DEF", def_path, lambda: ecc_module.read_def(def_path))
             elif verilog_path:
-                ecc_module.read_verilog(
-                    verilog=verilog_path,
-                    top_module=workspace.design.top_module,
+                require_design_read(
+                    "Verilog",
+                    verilog_path,
+                    lambda: ecc_module.read_verilog(
+                        verilog=verilog_path, top_module=workspace.design.top_module
+                    ),
                 )
             else:
                 return None
@@ -273,7 +290,6 @@ def create_db_engine(workspace: Workspace, step: WorkspaceStep) -> ECCToolsModul
 
     if not is_eda_exist() or not is_enable_setup():
         return None
-
     if step.name == StepEnum.LVS.value or not step.input.db:
         return load_design()
 
@@ -298,6 +314,8 @@ def get_eda_instance(
     if ecc_module is None:
         try:
             ecc_module = create_db_engine(workspace=workspace, step=step)
+        except EccDesignReadError:
+            raise
         except Exception as e:
             ecc_module = None
             workspace.logger.error(f"Failed to create ECC engine for step {step.name}: {e}")
@@ -387,7 +405,7 @@ def run_sta_without_spef(
             feature_dir=feature_dir,
             lib_paths=liberty_paths,
             sdc_path=sdc_path,
-            max_paths=workspace.parameters.data.get("STA max paths", 1000),
+            max_paths=workspace.parameters.data.get("sta_max_paths", 1000),
             corner=corner,
         )
     except Exception as exc:
@@ -464,20 +482,20 @@ def save_data(
         core_bounding_height = db_json.get("Design Layout", {}).get("core_bounding_height", 0)
         core_area = db_json.get("Design Layout", {}).get("core_area", 0)
 
-        margin = workspace.parameters.data.get("Core", {}).get("Margin", [0, 0])
+        margin = workspace.parameters.data.get("core", {}).get("margin", [0, 0])
 
         aspect_ratio = die_bounding_width / die_bounding_height if die_bounding_height > 0 else 1
 
         update_param = {
-            "Die": {"Size": [die_bounding_width, die_bounding_height], "Area": die_area},
-            "Core": {
-                "Size": [core_bounding_width, core_bounding_height],
-                "Area": core_area,
-                "Bounding box": (
+            "die": {"size": [die_bounding_width, die_bounding_height], "area": die_area},
+            "core": {
+                "size": [core_bounding_width, core_bounding_height],
+                "area": core_area,
+                "bounding_box": (
                     f"({margin[0]} , {margin[1]}) "
                     f"({core_bounding_width + margin[0]} , {core_bounding_height + margin[1]})"
                 ),
-                "Aspect ratio": aspect_ratio,
+                "aspect_ratio": aspect_ratio,
             },
         }
 
@@ -940,7 +958,7 @@ def run_sta(workspace: Workspace, step: EccStep, ecc_module: ECCToolsModule | No
             sdc_path=workspace.pdk.sdc,
             spef_path=spef_file,
             output_modes=("report", "structured"),
-            max_paths=workspace.parameters.data.get("STA max paths", 1000),
+            max_paths=workspace.parameters.data.get("sta_max_paths", 1000),
             corner=corner,
         )
 

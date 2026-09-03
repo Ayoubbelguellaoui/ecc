@@ -14,9 +14,10 @@ from types import SimpleNamespace
 import pytest
 
 from chipcompiler import tools
-from chipcompiler.data import EccOutput, EccStep, LogPaths, OriginDesign, StateEnum, Workspace
+from chipcompiler.data import EccOutput, EccStep, LogPaths, OriginDesign, StateEnum, StepEnum, Workspace
 from chipcompiler.data.workspace import Flow
 from chipcompiler.engine.flow import _VALID_TRANSITIONS, EngineFlow
+from chipcompiler.tools.ecc.runner import EccDesignReadError
 from chipcompiler.utility import Logger
 
 
@@ -293,6 +294,45 @@ class TestTransitionTableCompleteness:
         """No state transitions to itself (except implicitly via idempotency)."""
         for src, targets in _VALID_TRANSITIONS.items():
             assert src not in targets, f"{src} should not transition to itself"
+
+
+def test_design_read_failure_stops_flow_despite_stale_outputs(tmp_path, monkeypatch):
+    ws = _make_workspace(tmp_path, num_steps=2)
+    first_name = StepEnum.FLOORPLAN.value
+    second_name = StepEnum.PLACEMENT.value
+    ws.flow.data = {
+        "steps": [
+            {"name": first_name, "tool": "ecc", "state": StateEnum.Unstart.value},
+            {"name": second_name, "tool": "ecc", "state": StateEnum.Unstart.value},
+        ]
+    }
+    Path(ws.flow.path).write_text(json.dumps(ws.flow.data), encoding="utf-8")
+
+    stale_output = Path(ws.directory) / "floorplan_ecc" / "output" / "design.def"
+    stale_output.parent.mkdir(parents=True)
+    stale_output.write_text("stale", encoding="utf-8")
+    flow = EngineFlow(ws)
+    flow.workspace_steps = [
+        EccStep(
+            name=first_name,
+            tool="ecc",
+            directory=stale_output.parent.parent,
+            output=EccOutput(def_=stale_output),
+        ),
+        EccStep(name=second_name, tool="ecc", directory=Path(ws.directory) / "placement_ecc"),
+    ]
+    tool_runs = []
+    monkeypatch.setattr("chipcompiler.tools.load_eda_module", lambda _tool: object())
+    monkeypatch.setattr(
+        "chipcompiler.tools.ecc.create_db_engine",
+        lambda *_args: (_ for _ in ()).throw(EccDesignReadError("missing PDK master")),
+    )
+    monkeypatch.setattr(tools, "run_step", lambda **_kwargs: tool_runs.append(True))
+
+    assert flow.run_steps() is False
+    assert tool_runs == []
+    assert flow.get_step(first_name, "ecc")["state"] == StateEnum.Imcomplete.value
+    assert flow.get_step(second_name, "ecc")["state"] == StateEnum.Unstart.value
 
 
 # ---------------------------------------------------------------------------
@@ -619,3 +659,28 @@ def test_engine_flow_unusable_log_path_ends_incomplete(tmp_path, monkeypatch):
 
     persisted = json.loads((tmp_path / "home" / "flow.json").read_text())
     assert persisted["steps"][0]["state"] != StateEnum.Ongoing.value
+class TestRunStepsLedgerCompleteness:
+    """run_steps verifies full-ledger coverage by default; callers binding
+    execution to a reconciled range narrower than the persisted ledger opt
+    out explicitly."""
+
+    def _bound_flow(self, tmp_path, monkeypatch, ledger_steps: int, created_steps: int):
+        ws = _make_workspace(tmp_path, num_steps=ledger_steps)
+        flow = EngineFlow(workspace=ws)
+        flow.workspace_steps = [
+            SimpleNamespace(name=f"step_{i}", tool="mock") for i in range(created_steps)
+        ]
+        monkeypatch.setattr(flow, "init_db_engine", lambda: True)
+        monkeypatch.setattr(flow, "run_step", lambda *args, **kwargs: StateEnum.Success)
+        monkeypatch.setattr("chipcompiler.engine.flow.log_flow", lambda workspace: None)
+        return flow
+
+    def test_narrowed_execution_fails_full_ledger_check_by_default(self, tmp_path, monkeypatch):
+        flow = self._bound_flow(tmp_path, monkeypatch, ledger_steps=3, created_steps=2)
+
+        assert flow.run_steps() is False
+
+    def test_narrowed_execution_passes_when_full_ledger_not_required(self, tmp_path, monkeypatch):
+        flow = self._bound_flow(tmp_path, monkeypatch, ledger_steps=3, created_steps=2)
+
+        assert flow.run_steps(require_full_ledger=False) is True
