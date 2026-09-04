@@ -10,6 +10,7 @@ import logging
 import os
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -536,8 +537,8 @@ def test_agent_exception_traceback_lands_in_step_log(tmp_path, monkeypatch):
     )
 
 
-def test_agent_flow_unusable_log_path_ends_incomplete(tmp_path, monkeypatch):
-    """AgentEngineFlow: unusable step-log path (a directory) must not abort execution."""
+def test_agent_flow_unusable_log_path_does_not_block_execution(tmp_path, monkeypatch):
+    """AgentEngineFlow: unusable step-log path must not block tool execution."""
     import agent.engine as agent_engine
 
     step_dir = tmp_path / "Floorplan_ecc"
@@ -571,12 +572,14 @@ def test_agent_flow_unusable_log_path_ends_incomplete(tmp_path, monkeypatch):
     ]
     agent_flow.engine_db = SimpleNamespace(engine=None)
 
-    monkeypatch.setattr(agent_engine, "run_agent_step", lambda **_kw: True)
+    mock_run = MagicMock(return_value=True)
+    monkeypatch.setattr(agent_engine, "run_agent_step", mock_run)
     monkeypatch.setattr(agent_flow, "check_step_result", lambda **_kw: True)
 
     result = agent_flow.run_step(agent_flow.workspace_steps[0], rerun=False)
 
-    assert result == StateEnum.Imcomplete
+    assert mock_run.call_count == 1
+    assert result == StateEnum.Success
 
     persisted = json.loads((tmp_path / "flow.json").read_text())
     assert persisted["steps"][0]["state"] != StateEnum.Ongoing.value
@@ -641,8 +644,8 @@ def test_agent_flow_step_failure_not_silently_swallowed(tmp_path, monkeypatch):
     )
 
 
-def test_engine_flow_unusable_log_path_ends_incomplete(tmp_path, monkeypatch):
-    """EngineFlow: unusable step-log path must not abort execution."""
+def test_engine_flow_unusable_log_path_does_not_block_execution(tmp_path, monkeypatch):
+    """EngineFlow: unusable step-log path must not block tool execution."""
     flow = _make_resume_workspace(
         tmp_path,
         [("Floorplan", "Unstart")],
@@ -658,12 +661,14 @@ def test_engine_flow_unusable_log_path_ends_incomplete(tmp_path, monkeypatch):
         log=LogPaths(file=tmp_path),
     )
 
-    monkeypatch.setattr(tools, "run_step", lambda **_kw: True)
+    mock_run = MagicMock(return_value=True)
+    monkeypatch.setattr(tools, "run_step", mock_run)
     monkeypatch.setattr(flow, "check_step_result", lambda **_kw: True)
 
     result = flow.run_step(flow.workspace_steps[0], rerun=False)
 
-    assert result == StateEnum.Imcomplete
+    assert mock_run.call_count == 1
+    assert result == StateEnum.Success
 
     persisted = json.loads((tmp_path / "home" / "flow.json").read_text())
     assert persisted["steps"][0]["state"] != StateEnum.Ongoing.value

@@ -75,26 +75,27 @@ def execute_tool_step(
             observer_installed = True
         with capture_stdio_to_file(log_file) as capture_ok:
             if not capture_ok:
-                step_error = f"{step_tag} step log path is unusable: {log_file}"
-            else:
-                try:
-                    from chipcompiler.tools import run_step
+                workspace.logger.warning(
+                    "[STEP] %s step log path unavailable: %s", step_tag, log_file
+                )
+            try:
+                from chipcompiler.tools import run_step
 
-                    if engine_db is None:
-                        raise AttributeError("'NoneType' object has no attribute 'engine'")
-                    initialization_error = getattr(engine_db, "initialization_error", None)
-                    if initialization_error is not None:
-                        raise initialization_error
-                    result = run_step(
-                        workspace=workspace,
-                        step=workspace_step,
-                        ecc_module=engine_db.engine,
-                    )
-                    workspace.logger.info(f"[STEP] {step_tag} finished result={result}")
-                except (Exception, SystemExit) as exc:
-                    step_error = record_tool_failure(
-                        workspace.logger, step_tag, exc, step_log_file=log_file
-                    )
+                if engine_db is None:
+                    raise AttributeError("'NoneType' object has no attribute 'engine'")
+                initialization_error = getattr(engine_db, "initialization_error", None)
+                if initialization_error is not None:
+                    raise initialization_error
+                result = run_step(
+                    workspace=workspace,
+                    step=workspace_step,
+                    ecc_module=engine_db.engine,
+                )
+                workspace.logger.info(f"[STEP] {step_tag} finished result={result}")
+            except (Exception, SystemExit) as exc:
+                step_error = record_tool_failure(
+                    workspace.logger, step_tag, exc, step_log_file=log_file
+                )
     except (Exception, SystemExit) as exc:
         failure_message = record_tool_failure(
             workspace.logger, step_tag, exc, step_log_file=log_file
