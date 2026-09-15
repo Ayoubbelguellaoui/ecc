@@ -22,7 +22,14 @@ from ..parameter import (
     load_parameter as load_parameter,
 )
 from ..pdk import PDK, get_pdk
-from ..step import StateEnum, StepEnum
+from ..types import (
+    SkippableStepEnum,
+    StepBaseEnum,
+    StepEnum,
+)
+from ..types import (
+    StateEnum as StateEnum,
+)
 from ..workspace_config import (
     legacy_parameters_fallback as legacy_parameters_fallback,
 )
@@ -33,6 +40,18 @@ from ..workspace_config import (
     workspace_config_path as workspace_config_toml_path,
 )
 from .filelist_copy import copy_filelist_with_sources as copy_filelist_with_sources
+from .flow_data import (
+    _canonical_rtl2gds_flow_entries as _canonical_rtl2gds_flow_entries,
+)
+from .flow_data import (
+    _flow_step_template as _flow_step_template,
+)
+from .flow_data import (
+    _selected_dynamic_flow_step_names as _selected_dynamic_flow_step_names,
+)
+from .flow_data import (
+    build_dynamic_flow_data as build_dynamic_flow_data,
+)
 from .layout import EccData, WorkspaceStepBase
 from .macro_location import refresh_generated_macro_location
 from .sdc import create_default_sdc as create_default_sdc
@@ -79,8 +98,8 @@ class Flow:
             return []
         return [step for step in raw_steps if isinstance(step, dict)]
 
-    def get_step(self, name: str | StepEnum, tool: str | None = None) -> dict | None:
-        step_name = name.value if isinstance(name, StepEnum) else name
+    def get_step(self, name: str | StepBaseEnum, tool: str | None = None) -> dict | None:
+        step_name = name.value if isinstance(name, StepBaseEnum) else name
         for step in self.steps():
             if step.get("name") != step_name:
                 continue
@@ -88,7 +107,7 @@ class Flow:
                 return step
         return None
 
-    def has_step(self, name: str | StepEnum, tool: str | None = None) -> bool:
+    def has_step(self, name: str | StepBaseEnum, tool: str | None = None) -> bool:
         return self.get_step(name, tool) is not None
 
 
@@ -187,9 +206,11 @@ _LEGACY_WORKSPACE_CONFIG_FILENAMES: Final[dict[str, str]] = {
     "dreamplace": "dreamplace.json",
 }
 
-_STEP_BY_VALUE: Final[dict[str, StepEnum]] = {step.value: step for step in StepEnum}
+_STEP_BY_VALUE: Final[dict[str, StepBaseEnum]] = {
+    step.value: step for step in (*StepEnum, *SkippableStepEnum)
+}
 
-_STEP_CONFIG_KEYS: Final[dict[tuple[StepEnum, str], tuple[str, ...]]] = {
+_STEP_CONFIG_KEYS: Final[dict[tuple[StepBaseEnum, str], tuple[str, ...]]] = {
     (StepEnum.PRE_FLOORPLAN, "ecc"): ("db", StepEnum.FLOORPLAN.value),
     (StepEnum.MACRO_PLACEMENT, "dreamplace"): ("dreamplace", "macro_location"),
     (StepEnum.POST_FLOORPLAN, "ecc"): ("db", StepEnum.FLOORPLAN.value, "macro_location"),
@@ -203,12 +224,12 @@ _STEP_CONFIG_KEYS: Final[dict[tuple[StepEnum, str], tuple[str, ...]]] = {
     (StepEnum.STA, "ecc"): ("db", StepEnum.RCX.value, StepEnum.STA.value),
     (StepEnum.PLACEMENT, "dreamplace"): ("dreamplace",),
     (StepEnum.LEGALIZATION, "dreamplace"): ("dreamplace",),
-    (StepEnum.TIMING_OPT, "sizer"): ("db", "dreamplace"),
+    (SkippableStepEnum.TIMING_OPT, "sizer"): ("db", "dreamplace"),
 }
 
 
-def _workspace_step_enum(step: str | StepEnum) -> StepEnum | None:
-    if isinstance(step, StepEnum):
+def _workspace_step_enum(step: str | StepBaseEnum) -> StepBaseEnum | None:
+    if isinstance(step, StepBaseEnum):
         return step
     return _STEP_BY_VALUE.get(step)
 
@@ -246,7 +267,7 @@ def workspace_config_path(workspace_dir: str | Path, config_key: str) -> Path | 
     return workspace_config_paths(workspace_dir).get(config_key)
 
 
-def step_config_keys(step: str | StepEnum, tool: str | None) -> tuple[str, ...]:
+def step_config_keys(step: str | StepBaseEnum, tool: str | None) -> tuple[str, ...]:
     step_enum = _workspace_step_enum(step)
     if step_enum is None or tool is None:
         return ()
@@ -255,7 +276,7 @@ def step_config_keys(step: str | StepEnum, tool: str | None) -> tuple[str, ...]:
 
 def step_config_paths(
     workspace_dir: str | Path,
-    step: str | StepEnum,
+    step: str | StepBaseEnum,
     tool: str | None,
     *,
     existing_only: bool = False,
@@ -276,99 +297,6 @@ def build_workspace_config_paths(workspace: Workspace) -> dict[str, Path]:
     """Build workspace-level config file paths."""
     workspace_dir = Path(workspace.directory) if workspace.directory is not None else Path("")
     return workspace_config_paths(workspace_dir)
-
-
-def build_dynamic_flow_data(flow_config: dict | None) -> dict:
-    """Build initial flow.json data from GUI-provided flow_config.
-
-    A non-contiguous explicit selection degrades to the contiguous
-    first..last range (with a log note) so flow.json and the [flow] target
-    always describe the same steps.
-    """
-    if not isinstance(flow_config, dict) or not flow_config:
-        return {}
-
-    canonical_steps = _canonical_rtl2gds_flow_entries()
-    from ..workspace_config import resolve_flow_selection
-
-    selected_names, _degraded = resolve_flow_selection(flow_config, canonical_steps)
-    if not selected_names:
-        return {}
-
-    import chipcompiler.rtl2gds as rtl2gds_api
-
-    selected = rtl2gds_api.build_flow_range(selected_names[0], selected_names[-1])
-    return {
-        "steps": [
-            _flow_step_template(
-                name.value if isinstance(name, StepEnum) else str(name),
-                str(tool),
-                state.value if isinstance(state, StateEnum) else str(state),
-            )
-            for name, tool, state in selected
-        ]
-    }
-
-
-def _canonical_rtl2gds_flow_entries() -> list[tuple[str, str, str]]:
-    import chipcompiler.rtl2gds as rtl2gds_api
-
-    return [
-        (
-            step.value if isinstance(step, StepEnum) else str(step),
-            str(tool),
-            state.value if isinstance(state, StateEnum) else str(state),
-        )
-        for step, tool, state in rtl2gds_api.build_rtl2gds_flow()
-    ]
-
-
-def _selected_dynamic_flow_step_names(
-    flow_config: dict,
-    canonical_steps: list[tuple[str, str, str]],
-) -> list[str]:
-    canonical_names = [name for name, _tool, _state in canonical_steps]
-    canonical_name_set = set(canonical_names)
-
-    raw_steps = flow_config.get("steps", [])
-    if isinstance(raw_steps, str):
-        raw_steps = [raw_steps]
-    if isinstance(raw_steps, (list, tuple)):
-        requested = {
-            name
-            for name in (_normalize_flow_step_name(item) for item in raw_steps)
-            if name in canonical_name_set
-        }
-        if requested:
-            return [name for name in canonical_names if name in requested]
-
-    start_step = _normalize_flow_step_name(flow_config.get("start_step"))
-    end_step = _normalize_flow_step_name(flow_config.get("end_step"))
-    if start_step not in canonical_name_set or end_step not in canonical_name_set:
-        return []
-
-    start_index = canonical_names.index(start_step)
-    end_index = canonical_names.index(end_step)
-    start = min(start_index, end_index)
-    end = max(start_index, end_index)
-    return canonical_names[start : end + 1]
-
-
-def _normalize_flow_step_name(value) -> str:
-    from chipcompiler.rtl2gds import normalize_flow_step
-
-    return normalize_flow_step(value)
-
-
-def _flow_step_template(name: str, tool: str, state: str) -> dict:
-    return {
-        "name": name,
-        "tool": tool,
-        "state": state,
-        "runtime": "",
-        "peak memory (mb)": 0,
-        "info": {},
-    }
 
 
 @dataclass(frozen=True)
@@ -1053,6 +981,15 @@ def create_workspace(
         - input_filelist takes priority over origin_verilog for synthesis when both exist
         - All input files are copied to workspace/origin/ directory
     """
+    # The skip policy, the selected range, and the resulting ledger are
+    # fully resolved before anything on disk is touched: invalid
+    # configuration (including a preset target whose endpoint the policy
+    # skips) is an error, never a partial workspace.
+    from chipcompiler.rtl2gds import resolve_skip_steps
+
+    resolve_skip_steps(flow_config)
+    dynamic_flow_data = build_dynamic_flow_data(flow_config)
+
     # create workspace directory
     import shutil
 
@@ -1142,7 +1079,6 @@ def create_workspace(
     workspace.home.set_flow(workspace.flow.path)
     workspace.home.set_checklist(home_dir / "checklist.json")
     workspace.home.set_parameters(workspace.parameters.path)
-    dynamic_flow_data = build_dynamic_flow_data(flow_config)
     if dynamic_flow_data:
         from chipcompiler.utility import json_write
 
@@ -1161,6 +1097,15 @@ def create_workspace(
             dynamic_flow_data["steps"][0]["info"]["spef"] = str(workspace.pdk.spef)
         if not json_write(workspace.flow.path, workspace.flow.data):
             raise OSError(f"Failed to write initial flow.json: {workspace.flow.path}")
+    elif isinstance(flow_config, dict) and "skip_steps" in flow_config:
+        # A policy-only flow config selects no steps (the preset or the
+        # ledger-less rebuild owns the chain), but the declared policy must
+        # still persist so later rebuilds resolve the same chain.
+        from ..workspace_config import validate_flow_config
+
+        workspace.parameters.data["_flow"] = validate_flow_config(
+            {"skip_steps": flow_config["skip_steps"]}
+        )
 
     if workspace.pdk.root:
         workspace.parameters.data["pdk_root"] = str(workspace.pdk.root)

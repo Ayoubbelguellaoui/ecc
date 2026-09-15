@@ -129,6 +129,16 @@ class WorkspaceRuntimeApi(WorkspaceSpecRuntimeMixin):
         if not request.directory:
             raise RuntimeApiError("invalid_request", "missing required field: directory")
 
+        import chipcompiler.rtl2gds as rtl2gds_api
+
+        # The skip policy is validated before any sidecar artifact (temp
+        # filelist, inline PDK) is materialized: invalid input must not
+        # reach workspace creation or leave temporaries behind.
+        try:
+            rtl2gds_api.resolve_skip_steps(request.flow_config)
+        except ValueError as exc:
+            raise RuntimeApiError("config_error", f"invalid skip_steps: {exc}") from exc
+
         temp_filelist_dir = None
         input_filelist = request.filelist
         if not input_filelist:
@@ -2462,7 +2472,14 @@ def build_flow_for_workspace(workspace, *, create_step_workspaces: bool = True):
 
     engine_flow = engine_api.EngineFlow(workspace=workspace)
     if not engine_flow.has_init():
-        for step, tool, state in rtl2gds_api.build_rtl2gds_flow():
+        # Ledger-less rebuild: the workspace's persisted flow target carries
+        # the skip policy; the code default applies when none was persisted.
+        parameters_data = getattr(getattr(workspace, "parameters", None), "data", None)
+        persisted_flow = parameters_data.get("_flow") if isinstance(parameters_data, dict) else None
+        skip = rtl2gds_api.resolve_skip_steps(
+            persisted_flow if isinstance(persisted_flow, dict) else None
+        )
+        for step, tool, state in rtl2gds_api.build_rtl2gds_flow(skip=skip):
             engine_flow.add_step(step=step, tool=tool, state=state)
 
     if create_step_workspaces:

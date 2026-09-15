@@ -237,6 +237,7 @@ def execute_fresh_run(
         resolve_rtl,
         to_parameters,
     )
+    from chipcompiler.cli.project.effective_config import flow_config_selects_steps
     from chipcompiler.data import create_workspace
     from chipcompiler.data.parameter import save_parameter, update_parameters
     from chipcompiler.data.workspace.config_overrides import CONFIG_OVERRIDES_KEY
@@ -440,11 +441,20 @@ def execute_fresh_run(
                 with open(provenance_path, "w") as _f:
                     json.dump(cli_overrides, _f)
 
-            if flow_config is None:
-                # CLI-born workspaces persist the named prefix chain as their target.
+            if not flow_config_selects_steps(flow_config):
+                # CLI-born workspaces persist the named preset chain as
+                # their target; a declared skip policy rides along,
+                # normalized (validate_flow_config is the normalizer).
                 workspace_parameters = getattr(workspace, "parameters", None)
                 if workspace_parameters is not None:
-                    workspace_parameters.data["_flow"] = {"preset": cfg.flow_preset}
+                    flow_section: dict = {"preset": cfg.flow_preset}
+                    if isinstance(flow_config, dict) and "skip_steps" in flow_config:
+                        from chipcompiler.data.workspace_config import validate_flow_config
+
+                        flow_section = validate_flow_config(
+                            {"preset": cfg.flow_preset, "skip_steps": flow_config["skip_steps"]}
+                        )
+                    workspace_parameters.data["_flow"] = flow_section
                     if not save_parameter(workspace_parameters):
                         return failed_workspace("failed to persist the flow target in params.toml")
         except Exception as exc:
@@ -457,7 +467,13 @@ def execute_fresh_run(
             engine_flow = EngineFlow(workspace=workspace)
             flow_builders = rtl2gds_api.get_flow_builders()
             if not engine_flow.has_init():
-                for step, tool, state in flow_builders[cfg.flow_preset]():
+                # No-arg preset builders stay canonical; the skip policy is
+                # applied to their output so every ledger-creation path
+                # filters through one resolver.
+                for step, tool, state in rtl2gds_api.filter_flow_steps(
+                    flow_builders[cfg.flow_preset](),
+                    rtl2gds_api.resolve_skip_steps(flow_config),
+                ):
                     engine_flow.add_step(step=step, tool=tool, state=state)
 
             engine_flow.create_step_workspaces()
