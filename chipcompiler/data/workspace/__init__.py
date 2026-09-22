@@ -471,6 +471,24 @@ def _has_new_floorplan_schema(config: dict) -> bool:
     )
 
 
+def _refresh_sta_config(workspace: Workspace) -> None:
+    import os
+
+    from chipcompiler.utility import json_read, json_write
+
+    sta = json_read(workspace.config[f"{StepEnum.STA.value}"])
+    pdk_root = str(workspace.pdk.root or "").rstrip(os.sep)
+    for liberty in sta.get("liberty", []):
+        liberty["path"] = [
+            path
+            if path == pdk_root or path.startswith(f"{pdk_root}{os.sep}")
+            else str((workspace.pdk.root or Path("")) / path.lstrip(os.sep))
+            for path in liberty.get("path", [])
+        ]
+
+    json_write(workspace.config[f"{StepEnum.STA.value}"], sta)
+
+
 def _refresh_floorplan_config(workspace: Workspace, step: WorkspaceStep | None = None) -> None:
     from chipcompiler.utility import json_read, json_write
 
@@ -621,8 +639,6 @@ def init_workspace_config(workspace: Workspace) -> None:
 
 def refresh_workspace_config(workspace: Workspace) -> None:
     """Reload the workspace configuration and refresh configs derived from parameters/PDK."""
-    import os
-
     from chipcompiler.tools.ecc_dreamplace.parameter_overrides import apply_parameter_overrides
     from chipcompiler.utility import json_read, json_write
 
@@ -692,18 +708,6 @@ def refresh_workspace_config(workspace: Workspace) -> None:
     # rcx["corners"] = corners
     # json_write(workspace.config[f"{StepEnum.RCX.value}"], rcx)
 
-    sta = json_read(workspace.config[f"{StepEnum.STA.value}"])
-    pdk_root = str(workspace.pdk.root or "").rstrip(os.sep)
-    for liberty in sta.get("liberty", []):
-        liberty["path"] = [
-            path
-            if path == pdk_root or path.startswith(f"{pdk_root}{os.sep}")
-            else str((workspace.pdk.root or Path("")) / path.lstrip(os.sep))
-            for path in liberty.get("path", [])
-        ]
-
-    json_write(workspace.config[f"{StepEnum.STA.value}"], sta)
-
     dreamplace = json_read(workspace.config["dreamplace"])
     if not dreamplace:
         raise FileNotFoundError(
@@ -717,9 +721,15 @@ def refresh_workspace_config(workspace: Workspace) -> None:
     _coerce_legacy_dreamplace_routability_flag(workspace, dreamplace)
     json_write(workspace.config["dreamplace"], dreamplace)
 
+    from .config_manifest import record_derived_config
     from .config_overrides import apply_config_overrides
 
     apply_config_overrides(workspace.config, workspace.parameters.data)
+    # Expand PDK-relative liberty paths only after overrides are applied:
+    # explicit sta.liberty parameters carry the same PDK-relative defaults,
+    # and re-applying them above must not resurrect unexpanded paths.
+    _refresh_sta_config(workspace)
+    record_derived_config(workspace)
 
 
 def sync_workspace_config_to_parameters(workspace: Workspace, config_path: Path) -> bool:
@@ -815,8 +825,10 @@ def prepare_workspace_for_rerun(
 ) -> None:
     """Delete old run artifacts and restore runtime files before a full-flow rerun.
 
-    GUI reruns retain the user's current configuration and parameter values. CLI
-    keeps the established runtime-parameter reset behavior.
+    With preserve_user_inputs=True (the rerun default, GUI and CLI alike) the
+    workspace's current configuration and parameter values are retained. Pass
+    False to make the reset explicit: the template runtime parameters
+    (die/core) are restored and the generated configs refreshed.
     """
     import shutil
 
@@ -889,6 +901,9 @@ def update_step_config(workspace: Workspace, step: WorkspaceStep) -> None:
         from .config_overrides import apply_config_overrides
 
         apply_config_overrides(workspace.config, workspace.parameters.data)
+        # Overrides replay raw PDK-relative sta.liberty defaults; re-expand
+        # them so a mid-run step build cannot resurrect unexpanded paths.
+        _refresh_sta_config(workspace)
 
     if step.name == StepEnum.ROUTING.value and isinstance(step.data, EccData):
         router = json_read(workspace.config[f"{StepEnum.ROUTING.value}"])

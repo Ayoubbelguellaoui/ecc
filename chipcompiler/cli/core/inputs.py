@@ -220,6 +220,7 @@ class WorkspaceRefreshInput:
     output: OutputOptions
     project: ProjectOptions
     workspace: str
+    force: bool = False
 
 
 @dataclass(frozen=True)
@@ -253,6 +254,14 @@ class MacroRemoveInput:
 class MacroShowInput:
     output: OutputOptions
     project: ProjectOptions
+    workspace: str | None = None
+
+
+@dataclass(frozen=True)
+class MacroImportInput:
+    output: OutputOptions
+    project: ProjectOptions
+    path: str
     workspace: str | None = None
 
 

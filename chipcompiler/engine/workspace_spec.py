@@ -1,8 +1,10 @@
+from collections.abc import Collection
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
 from chipcompiler.data import DEFAULT_SKIP_STEPS, StepBaseEnum
+from chipcompiler.data.param_keys import display_key_for, knob_id_for
 from chipcompiler.data.parameter_schema import list_schemas, resolve_parameters
 from chipcompiler.engine.pdk_binding import pdk_binding_content_hash
 from chipcompiler.rtl2gds import get_flow_builders, normalize_flow_step
@@ -45,6 +47,8 @@ def describe_workspace_spec() -> dict[str, Any]:
                 "default": deepcopy(schema.default),
                 "appliesTo": schema.applies,
                 "backendMapping": deepcopy(schema.maps_to),
+                "display_key": display_key_for(schema.param),
+                "knob_id": knob_id_for(schema.param),
                 **({"range": list(schema.range)} if schema.range else {}),
                 **({"choices": list(schema.choices)} if schema.choices else {}),
                 **({"unit": schema.unit} if schema.unit else {}),
@@ -66,7 +70,12 @@ def describe_workspace_spec() -> dict[str, Any]:
     }
 
 
-def validate_workspace_spec(spec: object, bindings: object) -> dict[str, Any]:
+def validate_workspace_spec(
+    spec: object,
+    bindings: object,
+    *,
+    preserved_parameters: Collection[str] = (),
+) -> dict[str, Any]:
     issues: list[dict[str, Any]] = []
     if not isinstance(spec, dict):
         return {"issues": [_issue("invalid_type", "", expected="object")]}
@@ -167,7 +176,12 @@ def validate_workspace_spec(spec: object, bindings: object) -> dict[str, Any]:
                 reason=error,
             )
         )
-    _validate_parameter_applicability(parameters, flow_steps, issues)
+    _validate_parameter_applicability(
+        parameters,
+        flow_steps,
+        issues,
+        preserved_parameters=set(preserved_parameters),
+    )
 
     mpc = spec.get("mpc")
     if mpc is not None:
@@ -183,7 +197,11 @@ def validate_workspace_spec(spec: object, bindings: object) -> dict[str, Any]:
         return {"issues": issues}
 
     resolved = deepcopy(spec)
-    resolved["parameters"] = _effective_parameter_values(resolved_parameters, flow_steps)
+    resolved["parameters"] = _effective_parameter_values(
+        resolved_parameters,
+        flow_steps,
+        preserved_parameters=set(preserved_parameters),
+    )
     resolved["pdk"] = {
         **deepcopy(pdk),
         "version": requested_version or bound_version or "unversioned",
@@ -324,9 +342,14 @@ def _validate_parameter_applicability(
     explicit: dict[str, Any],
     flow_steps: set[str],
     issues: list[dict[str, Any]],
+    *,
+    preserved_parameters: set[str] | None = None,
 ) -> None:
+    preserved = preserved_parameters or set()
     for schema in list_schemas():
         if schema.param not in explicit:
+            continue
+        if schema.param in preserved:
             continue
         if schema.applies == "all":
             continue
@@ -340,13 +363,20 @@ def _validate_parameter_applicability(
             )
 
 
-def _effective_parameter_values(resolved, steps: set[str]) -> dict[str, object]:
+def _effective_parameter_values(
+    resolved,
+    steps: set[str],
+    *,
+    preserved_parameters: set[str] | None = None,
+) -> dict[str, object]:
+    preserved = preserved_parameters or set()
     return {
         parameter.param: deepcopy(parameter.value)
         for parameter in resolved
         if parameter.schema.pdk_target is None
         and (
-            parameter.schema.applies == "all"
+            parameter.param in preserved
+            or parameter.schema.applies == "all"
             or _parameter_applies_to_flow(parameter.schema.applies, steps)
         )
     }

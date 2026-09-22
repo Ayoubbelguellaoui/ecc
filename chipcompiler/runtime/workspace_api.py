@@ -387,7 +387,11 @@ class WorkspaceRuntimeApi(WorkspaceSpecRuntimeMixin):
         def reset(session: WorkspaceSession) -> dict:
             self._release_session_db(session)
             engine_flow = build_flow_for_workspace(session.workspace)
-            self._prepare_workspace_for_rerun(session.workspace, engine_flow)
+            self._prepare_workspace_for_rerun(
+                session.workspace,
+                engine_flow,
+                preserve_user_inputs=True,
+            )
             return {"directory": str(session.directory)}
 
         return self._with_session_mutation_lock(request.workspace_id, reset)
@@ -424,7 +428,16 @@ class WorkspaceRuntimeApi(WorkspaceSpecRuntimeMixin):
         return self._with_session_mutation_lock(request.workspace_id, close)
 
     def flow_run(self, request: FlowRunRequest) -> dict:
-        return self._flow_run(request)
+        """Run the persisted flow; ``rerun=True`` re-executes it from scratch.
+
+        A rerun preserves the workspace's current parameter values by
+        default (GUI parity); ``reset_runtime_params=True`` is the explicit
+        opt-out that additionally restores the template runtime parameters.
+        """
+        return self._flow_run(
+            request,
+            preserve_user_inputs=not request.reset_runtime_params,
+        )
 
     def _flow_run(
         self,
@@ -1123,6 +1136,11 @@ class WorkspaceRuntimeApi(WorkspaceSpecRuntimeMixin):
             edit_session.source_kind = "db"
             edit_session.source_paths = (output_db,)
             edit_session.source_fingerprint = _artifact_fingerprint(edit_session.source_paths)
+            macro_location_path = (
+                _write_macro_location_tcl(module, session.workspace)
+                if request.write_macro_location
+                else None
+            )
             workspace_revision = None
             snapshot_path = Path(session.workspace.directory) / "home" / "engineering-snapshot.json"
             if snapshot_path.is_file():
@@ -1131,7 +1149,12 @@ class WorkspaceRuntimeApi(WorkspaceSpecRuntimeMixin):
                     "layout.edit.save",
                 )
             edit_session.dirty = False
-            result = _layout_edit_save_result(edit_session, saved=True, artifacts=artifacts)
+            result = _layout_edit_save_result(
+                edit_session,
+                saved=True,
+                artifacts=artifacts,
+                macro_location_path=macro_location_path,
+            )
             if workspace_revision is not None:
                 result["workspaceRevision"] = workspace_revision
             _release_layout_edit_ownership_lock(edit_session)
@@ -1583,10 +1606,11 @@ def _layout_edit_save_result(
     *,
     saved: bool,
     artifacts: dict[str, str] | None = None,
+    macro_location_path: Path | None = None,
 ) -> dict:
     if artifacts is None:
         artifacts = _layout_edit_published_artifacts(edit_session.workspace_step)
-    return {
+    result = {
         "editSessionId": edit_session.edit_session_id,
         "revision": edit_session.revision,
         "geometryRevision": edit_session.geometry_revision,
@@ -1595,6 +1619,19 @@ def _layout_edit_save_result(
         "sourceFingerprint": edit_session.source_fingerprint,
         "artifacts": artifacts,
     }
+    if macro_location_path is not None:
+        result["macroLocationPath"] = str(macro_location_path)
+    return result
+
+
+def _write_macro_location_tcl(module, workspace) -> Path:
+    from chipcompiler.data.workspace import workspace_config_paths
+
+    path = workspace_config_paths(workspace.directory)["macro_location"]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not module.tcl_save(str(path)):
+        raise RuntimeApiError("command_failed", "macro location tcl export failed")
+    return path
 
 
 def _layout_edit_published_artifacts(workspace_step) -> dict:

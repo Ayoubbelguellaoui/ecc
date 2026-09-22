@@ -724,10 +724,11 @@ def test_refresh_sync_and_reset_flow_use_session(monkeypatch, tmp_path):
         "chipcompiler.data.sync_workspace_config_to_parameters",
         lambda workspace, path: synced.append((workspace.directory, path)) or True,
     )
-    monkeypatch.setattr(
-        "chipcompiler.data.prepare_workspace_for_rerun",
-        lambda workspace, flow, **_kwargs: prepared.append((workspace.directory, flow)),
-    )
+
+    def prepare(workspace, flow, **kwargs):
+        prepared.append((workspace.directory, flow, kwargs.get("preserve_user_inputs")))
+
+    monkeypatch.setattr("chipcompiler.data.prepare_workspace_for_rerun", prepare)
     config_dir = ws / "config"
     config_dir.mkdir()
     config_path = config_dir / "route.json"
@@ -754,7 +755,7 @@ def test_refresh_sync_and_reset_flow_use_session(monkeypatch, tmp_path):
     assert reset == {"directory": str(ws.resolve())}
     assert refreshed == [ws.resolve(), ws.resolve()]
     assert synced == [(ws.resolve(), config_path.resolve())]
-    assert prepared == [(ws.resolve(), DummyFlow.instances[-1])]
+    assert prepared == [(ws.resolve(), DummyFlow.instances[-1], True)]
 
 
 def test_refresh_config_releases_active_session_db(monkeypatch, tmp_path):
@@ -1142,6 +1143,26 @@ def test_flow_run_uses_run_steps_and_prepare_on_rerun(monkeypatch, tmp_path):
     workspace_id = api.open_workspace(WorkspaceOpenRequest(directory=str(ws)))["workspaceId"]
 
     result = api.flow_run(FlowRunRequest(workspace_id=workspace_id, rerun=True))
+
+    flow = DummyFlow.instances[-1]
+    assert result == {"rerun": True}
+    assert prepared == [(ws.resolve(), flow, {"preserve_user_inputs": True})]
+    assert flow.run_steps_calls == [True]
+
+
+def test_flow_run_reset_runtime_params_opts_out_of_preservation(monkeypatch, tmp_path):
+    _capture, ws = _install_runtime_mocks(monkeypatch, tmp_path)
+    prepared = []
+    monkeypatch.setattr(
+        "chipcompiler.data.prepare_workspace_for_rerun",
+        lambda workspace, flow, **kwargs: prepared.append((workspace.directory, flow, kwargs)),
+    )
+    api = WorkspaceRuntimeApi()
+    workspace_id = api.open_workspace(WorkspaceOpenRequest(directory=str(ws)))["workspaceId"]
+
+    result = api.flow_run(
+        FlowRunRequest(workspace_id=workspace_id, rerun=True, reset_runtime_params=True)
+    )
 
     flow = DummyFlow.instances[-1]
     assert result == {"rerun": True}
