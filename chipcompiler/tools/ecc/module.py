@@ -1,5 +1,4 @@
 #!/usr/bin/env python
-import json
 import os
 import shutil
 from pathlib import Path
@@ -242,9 +241,9 @@ class ECCToolsModule:
         """save gds file"""
         self.ecc.gds_save(path_text(output_path), is_harden)
 
-    def tcl_save(self, output_path: str):
-        """save tcl file"""
-        self.ecc.tcl_save(path_text(output_path))
+    def tcl_save(self, output_path: PathArg) -> bool:
+        """Save hard-macro placement commands in Tcl format."""
+        return self.ecc.tcl_save(path_text(output_path))
 
     def verilog_save(self, output_verilog, cell_names: set | None = None):
         """verilog save"""
@@ -290,8 +289,12 @@ class ECCToolsModule:
         """
         return self.ecc.view_json_apply_edits(edits_path=path_text(edits_path), compress=compress)
 
-    def geometry_snapshot_save(self, output_dir: PathArg):
+    def geometry_snapshot_save(self, output_dir: PathArg, *, include_drc: bool = False):
         """Export the current in-memory IDB geometry for GUI rendering."""
+        if include_drc:
+            return self.ecc.geometry_snapshot_save(
+                output_dir=path_text(output_dir), include_drc=True
+            )
         return self.ecc.geometry_snapshot_save(output_dir=path_text(output_dir))
 
     def initialize_geometry_session(self):
@@ -518,6 +521,9 @@ class ECCToolsModule:
     def init_fp(self, config: str):
         return self.ecc.init_fp(config=path_text(config))
 
+    def run_simple_fp(self):
+        return self.ecc.run_simple_fp()
+
     def run_fp(self):
         return self.ecc.run_fp()
 
@@ -565,18 +571,6 @@ class ECCToolsModule:
     # read route def and save route data to json
     def feature_route(self, json_path: str):
         self.ecc.feature_route(path=path_text(json_path))
-
-    def is_rt_timing_enable(self, config: str):
-        if os.path.exists(config):
-            with open(config, encoding="utf-8") as f_reader:
-                json_data = json.load(f_reader)
-                # check if time enable
-                if (
-                    json_data is not None
-                    and json_data.get("RT", {}).get("-enable_timing", "0") == "1"
-                ):
-                    return True
-        return False
 
     ########################################################################
     # RCX api

@@ -21,7 +21,7 @@ from chipcompiler.data import (
     WorkspaceStep,
     get_parameters,
 )
-from chipcompiler.tools.ecc_dreamplace.module import DreamplaceModule
+from chipcompiler.tools.ecc_dreamplace.module import DreamplaceModule, DreamplaceRunMode
 from chipcompiler.utility import json_write
 
 # Every direct workspace parameter key accessed by builder/helper code,
@@ -96,7 +96,6 @@ PARAM_CONFIG_DEFAULTS: list[tuple[str, float, float, str]] = [
     ("Target overflow", 0.1, 0.1, "dreamplace.stop_overflow"),
     ("Cell padding x", 300, 300, "dreamplace.cell_padding_x"),
     ("Routability opt flag", 1, 1, "dreamplace.routability_opt_flag"),
-    ("Max fanout", 20, 32, "cts.max_fanout"),
 ]
 
 
@@ -203,7 +202,7 @@ def test_routability_runtime_flags_are_config_driven(tmp_path) -> None:
         output_verilog=Path("output.v"),
     )
 
-    params = module._build_params(FakeDreamplaceParams, legalize_only=False)
+    params = module._build_params(FakeDreamplaceParams, mode=DreamplaceRunMode.PLACEMENT)
 
     assert params.routability_opt_flag == 1
     assert params.get_congestion_map == 1

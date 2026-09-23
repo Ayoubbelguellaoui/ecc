@@ -147,6 +147,7 @@ from pathlib import Path
 
 from chipcompiler.data import Workspace, WorkspaceStep
 
+
 def build_step(
     workspace: Workspace,
     step_name: str,
@@ -160,11 +161,14 @@ def build_step(
     directory = Path(workspace.directory) / f"{step_name}_<tool_name>"
     return WorkspaceStep(name=step_name, tool="<tool_name>", directory=directory)
 
+
 def build_step_space(workspace_step: WorkspaceStep) -> None:
     Path(workspace_step.directory).mkdir(parents=True, exist_ok=True)
 
-def build_step_config(workspace: Workspace, workspace_step: WorkspaceStep) -> None:
-    ...  # write the step's config files from the workspace parameters
+
+def build_step_config(
+    workspace: Workspace, workspace_step: WorkspaceStep
+) -> None: ...  # write the step's config files from the workspace parameters
 ```
 
 `runner.py`:
@@ -174,12 +178,14 @@ import subprocess
 
 from chipcompiler.data import Workspace, WorkspaceStep
 
+
 def is_eda_exist() -> bool:
     try:
         subprocess.run(["<tool_name>", "--version"], capture_output=True, check=True)
         return True
     except (subprocess.CalledProcessError, FileNotFoundError):
         return False
+
 
 def run_step(workspace: Workspace, step: WorkspaceStep, ecc_module=None) -> bool:
     result = subprocess.run(
@@ -272,9 +278,11 @@ chipcompiler/cli/commands/        # typer command definition layer (thin)
   ├── project.py                  # registration and option declarations for init/check/run/status/log/config/migrate
   ├── doctor.py                   # doctor top-level command (environment check)
   ├── param.py                    # param sub-app (list/show/set/unset/diff)
+  ├── macro.py                    # macro sub-app (set/remove/show/import)
+  ├── doc.py                      # doc command (render the bundled guides in the terminal)
   ├── pdk.py                      # pdk sub-app (set-root/show/unset)
   ├── project_config.py           # project sub-app (set/unset/add/remove/show)
-  ├── workspace.py                # workspace sub-app (refresh)
+  ├── workspace.py                # workspace sub-app (import/refresh)
   ├── signoff.py                  # signoff sub-app (inspect/export)
   ├── report.py                   # report sub-app (summary/qor/checklist/step)
   └── rpc.py                      # rpc sub-app (serve)
@@ -286,6 +294,7 @@ chipcompiler/cli/command_handlers/  # business logic layer (stateful / heavy)
   ├── pdk.py                      # the three pdk subcommands (surgical TOML edit + root source resolution)
   ├── project_config.py           # the five project subcommands (declaration schema + TOML edits via cli/project/config_fields.py)
   ├── workspace_params.py         # workspace-scoped param set/unset/list/diff (home/params.toml mutation + step invalidation)
+  ├── macro.py                    # macro set/remove/show/import (macro_location.tcl render + params.toml writes)
   ├── signoff.py                  # signoff inspect/export
   └── report.py                   # the four report subcommands (file writing + record summary)
 chipcompiler/cli/core/            # framework layer
@@ -300,10 +309,11 @@ chipcompiler/cli/inspection/      # read-only probing logic
   ├── discovery.py / config_view.py / log_view.py
   ├── env_probe.py                # environment probes for doctor/run preflight (the ProbeResult model)
   └── tool_versions.py            # environment tool versions for ecc version (yosys/sizer/klayout)
-chipcompiler/cli/project/         # config.py (ecc.toml parsing and validation) / config_fields.py (project declaration schema for `ecc project`) / params.py (parameter registry) / workspace_params.py (workspace-local override records) / manifest.py (project-state classification) / effective_config.py / config_params/ (direct-config schemas) / migrate*.py (legacy-layout migration) / run_*.py (workspace target resolution and dispatch)
+chipcompiler/cli/project/         # config.py (ecc.toml parsing and validation) / config_fields.py (project declaration schema for `ecc project`) / params.py (parameter registry) / toml_edit.py (surgical TOML editing) / workspace_params.py (workspace-local override records) / manifest.py (project-state classification) / manifest_write.py (project.json status write-back) / workspace_registration.py (external workspace import) / effective_config.py / pdk_root_fallback.py (PDK root env-fallback warning) / spec_drift.py (workspace_spec_drift disclosure) / design_inputs.py (`[design]` input declarations) / config_params/ (direct-config schemas) / migrate*.py (legacy-layout migration) / run_*.py (workspace target resolution and dispatch)
 chipcompiler/cli/rendering/       # output rendering (render / renderers / pretty / progress)
 chipcompiler/engine/signoff/      # signoff collector + design/checklist reports (package, see below)
-chipcompiler/engine/qor_report.py # overall QoR scoring (port of the GUI rules)
+chipcompiler/analysis/qor/ # canonical QoR v3 analysis, scoring, and report contract
+chipcompiler/engine/qor_report.py # CLI QoR facade delegating to analysis.qor
 ```
 
 Module placement is enforced by `test/cli/test_cli_module_layout.py`: the core
@@ -316,7 +326,9 @@ the `cli/` root.
 
 Public command ownership is strict: `ecc signoff` owns package readiness and
 archive export (`inspect`, `export`); `ecc report` owns all report output
-(`summary`, `qor`, `checklist`, `step`). `ecc config [STEP]` always returns
+(`summary`, `qor`, `checklist`, `step`); `ecc macro` owns manual macro
+placement (`set`, `remove`, `show`, `import`); `ecc doc` renders the bundled
+guides in the terminal. `ecc config [STEP]` always returns
 resolved data, so it has no `--resolved` switch. Do not introduce an alias in
 the wrong group or an option that does not change behavior.
 
@@ -330,7 +342,7 @@ Using `ecc check --project gcd --plain` as the example:
    execute_command("check", command_input, project_handlers.check)
    ```
 3. `core/invocation.py::execute_command()` (`cli/core/invocation.py`) then:
-   - `build_context()`: resolves the project directory (`--project`, defaulting to cwd) → reads its sole `ecc.toml` (an unreadable file is recorded in `config_error`) → classifies the project state via `cli/project/manifest.py::classify_project()` (manifest / legacy / virgin). Manifest projects resolve `--workspace NAME` only through the `project.json` workspaces table: one active workspace auto-selects, multiple ones require the selector, and a new `ecc run --workspace NAME` target is registered before files are created. `--workspace` is a single project-local name, never a direct path. A legacy project must migrate before `ecc run`; a corrupt manifest yields `manifest_invalid`. The context derives `OutputMode` from `--plain` and carries `project_state` / `manifest_error` (`cli/core/types.py`).
+   - `build_context()`: resolves the project directory (`--project`, defaulting to cwd) → reads its sole `ecc.toml` (an unreadable file is recorded in `config_error`) → classifies the project state via `cli/project/manifest.py::classify_project()` (manifest / legacy / virgin). Manifest projects resolve a single-segment `--workspace NAME` through the `project.json` workspaces table, while an absolute `--workspace PATH` is canonicalized as an external target and matched by path before basename-based ID resolution. One active workspace auto-selects, multiple ones require the selector, and a new run target is registered before files are created. A legacy project must migrate before `ecc run`; a corrupt manifest yields `manifest_invalid`. The context derives `OutputMode` from `--plain`, records whether the selector was an explicit path, and carries `project_state` / `manifest_error` (`cli/core/types.py`).
    - Calls the handler: `handler(command_input, ctx) -> CommandResult`.
    - After the handler, records are appended as needed (`_with_legacy_hint` / `_with_config_shadow_hint`): `run/check/status` on a legacy project carry a migration hint (pointing at `ecc migrate`); when a workspace's `home/` holds both `params.toml` and the legacy `parameters.json`, a `workspace_config_shadowed` warning is emitted (the JSON is inert).
    - Renders: `rendering/renderers.py::render_command_result()` first looks up a custom renderer in `RENDERERS[(render_key, output_mode)]`, falling back to the generic `rendering/render.py::render_result()`.
@@ -393,8 +405,10 @@ are mandatory, the last 2 as needed):
    ```python
    from chipcompiler.cli.core.options import PlainOption, ProjectOption
 
+
    def register_project_commands(app: typer.Typer) -> None:
        app.command("check", help="Validate the current project setup")(check_cmd)
+
 
    def check_cmd(
        *,
@@ -501,7 +515,8 @@ liberty paths as CLI parameters.
 `config_params/coverage.py` compares each JSON template field with exactly one
 direct schema, legacy mapping, or protected-path entry. Update that manifest
 and `test/cli/params/test_config_coverage.py` whenever a template changes.
-Parsing and surgical TOML editing remain in `params.py`; command tests remain
+Parsing remains in `params.py`; surgical TOML editing lives in
+`cli/project/toml_edit.py`; command tests remain
 in `test/cli/params/`.
 
 #### Extending `ecc run`
@@ -512,9 +527,13 @@ in `test/cli/params/`.
 - **Fresh workspace**: resolve `[design]` input declarations, PDK, parameters,
   and the requested entry step; validate only that entry step's required files;
   atomically pre-register the managed name in `project.json` as `not_started`;
-  preflight tools; call `create_workspace` at `<project>/<workspace-name>`.
+  preflight tools; call `create_workspace` at `<project>/<workspace-name>` for
+  a name selector or the exact absolute workspace path for a path selector.
   `create_workspace` copies inputs to `origin/` and produces all step configs;
-  the CLI never rewrites those configs afterwards. A normal fresh flow uses a
+  outside the derivation paths the CLI does not rewrite those configs
+  afterwards: a rerun regenerates each re-executed step's `config/*.json`
+  from `home/params.toml`, and `ecc param set --workspace` / `ecc workspace
+  refresh` refresh the derived configs. A normal fresh flow uses a
   preset. `--from A --to B` instead calls `rtl2gds.build_flow_range(A, B)` to
   construct the inclusive canonical range. New ranges cannot combine with
   `--preset`, `--overwrite`, `--resume`, `--only`, or `--force`.
@@ -525,7 +544,18 @@ in `test/cli/params/`.
   `run_only` from `chipcompiler.engine.rerun`. `--from A --to B` is an
   inclusive persisted range and invalidates its downstream suffix while
   retaining downstream output files. Existing workspaces neither preflight
-  fresh inputs nor rewrite copied inputs/configuration.
+  fresh inputs nor rewrite copied inputs; their step configs are regenerated
+  only on the derivation paths above (rerun, `ecc param set --workspace`,
+  `ecc workspace refresh`).
+
+`ecc workspace import NAME --path /absolute/workspace` uses
+`cli/project/workspace_registration.py` to validate persisted workspace
+identity, flow range, status, and parameter differences before atomically
+adding the canonical path to `project.json`. An absolute
+`ecc run --workspace /absolute/workspace` selector uses the same service when
+it discovers an unregistered existing workspace.
+All later commands resolve the external directory through the manifest and do
+not accept a second path override.
 
 Project preset sequences are defined in `chipcompiler/rtl2gds/builder.py`
 (`build_*_flow()` / `get_flow_builders()`), not in the CLI layer.
@@ -533,7 +563,10 @@ Project preset sequences are defined in `chipcompiler/rtl2gds/builder.py`
 step aliases and ordering have one source of truth. Keep a sequence change
 coordinated with the engine's default flow, `StepEnum`, and manifest range
 mappings; the CLI only handles argument parsing, input contracts,
-progress-renderer selection, and result mapping.
+progress-renderer selection, and result mapping. Interactive TTY
+`ecc run` uses `run_flow_with_progress()`; `--plain` and GUI use
+`execute()`. Both attach the same Engineering Snapshot commit observer
+so each completed step updates `home/engineering-snapshot.json`.
 
 #### Extending environment probing (doctor / preflight)
 
@@ -571,13 +604,16 @@ required by doctor.
   / `report_text.py` formatting), all exposed through the package `__init__`.
   Add a report section through an `_extract_<family>(q)` in
   `report_sections.py` (or the timing chain) and register it from `report.py`.
-- `engine/qor_report.py`: the single-workspace port of the GUI's
-  `projectQorTrend.ts` — constant tables
-  (`METRIC_FAIL_VALUES`/`DIMENSION_WEIGHTS`/`QOR_SCORE_THRESHOLD`) +
-  normalization + project-level record selection (role priority
-  final>gate>trend; area_cost only from the last successful area step) + the
-  `score_record` formulas + dimension weighting (no renormalization). Adding a
-  scoreable metric = adding its threshold here and in the GUI.
+- `analysis/qor/`: the canonical QoR v3 Engine. It owns metric loading,
+  feature and dimension evaluation, feasibility gates, evidence, scoring,
+  diagnoses, interventions, the bounded report schema, and text rendering.
+  New QoR conclusions belong here; do not copy thresholds or formulas into
+  the GUI or CLI.
+- `engine/qor_report.py`: the CLI `ecc report qor` facade. It delegates to
+  `analysis.qor` and does not own a second scoring implementation.
+- `engine/qor_scoring.py` and `engine/qor.py`: legacy v2 Snapshot assessment
+  kept only while production Snapshot writes remain v2. Do not extend this
+  path for QoR v3 consumers.
 - `engine/signoff/report_checklist.py`: read-only rendering of
   `home/checklist.json` (reports unavailable on an invalid file; never writes
   back).
@@ -609,7 +645,11 @@ no CLI-layer changes needed.
   which is why it runs the same environment preflight as a fresh run (`preset:
   rtl2gds` from `ecc.toml` means the full tool set must be ready, even though
   no step executes). On a non-manifest project it reports
-  `workspace_refresh_requires_managed_workspace`.
+  `workspace_refresh_requires_managed_workspace`. Before overwriting it
+  compares `config/*.json` against the last derivation record
+  (`home/config-derived-manifest.json`, written by
+  `refresh_workspace_config`); a detected difference refuses with
+  `derived_configs_modified` listing the files unless `--force` is given.
 - Workspace-scoped `param set/unset/list/diff --workspace NAME` mutate
   `home/params.toml` through `cli/command_handlers/workspace_params.py`
   (records in `workspace_param_overrides`, suffix invalidation via
@@ -667,19 +707,58 @@ uv run ecc pdk show
 `ecc run --preset <name>` overrides `[flow] preset` for a single run without
 editing `ecc.toml`. Valid names are auto-discovered from
 `chipcompiler/rtl2gds/builder.py` (`rtl2gds | syn_sta | synthesis_lec`); the
-`rtl2gds` preset is the full synthesis-to-harden chain (15 steps, with a
-synthesis-level LEC immediately after Synthesis; Harden
-emits GDS + abstract LEF + timing LIB):
+`rtl2gds` preset is the full synthesis-to-harden chain (17 canonical steps,
+including a synthesis-level LEC immediately after Synthesis that the default
+skip policy excludes — see [Skippable Flow Steps](#skippable-flow-steps);
+Harden emits GDS + abstract LEF + timing LIB):
 
 ```bash
 uv run ecc run --project gcd --preset rtl2gds
 ```
 
+### Skippable Flow Steps
+
+Three optional steps can be excluded from a workspace at creation time:
+the synthesis LEC (`lec`), the post-route LEC (`postRouteLec`), and timing
+optimization (`Timing optimization`). Skipped steps never enter the
+workspace's execution ledger — their inputs fall through to the previous
+retained step, and no step directory is created for them. State-machine,
+resume/rerun semantics are unchanged, and existing ledgers are never
+re-filtered: changing the policy later cannot insert or remove steps in a
+created workspace.
+
+The policy is declared on two surfaces, with the common precedence
+(ecc.toml overrides the project.json base, like every other key):
+
+1. `ecc.toml` → `[flow] skip_steps` (project level; an explicit
+   declaration — including an empty list — wins over the workspace entry),
+2. `project.json` → `workspaces[].skip_steps` (per-workspace base layer),
+3. code default `("lec",)` when neither declares the key.
+
+When both surfaces declare the policy with different effective values,
+`ecc run`/`ecc check` emit a `skip_steps_shadowed` warning naming the
+winning source.
+
+An explicit `skip_steps = []` runs every step and is the only way to
+enable the synthesis LEC. Selecting the `synthesis_lec` preset while the
+effective policy skips `lec` is a creation-time configuration error; the
+fix is `skip_steps = []`. Entries accept the same aliases as flow ranges
+(e.g. `LEC`, `postlec`, `TimingOpt`) and are validated against the
+skippable set.
+
+```toml
+[flow]
+preset = "rtl2gds"
+# LEC is skipped by default; clear the list to enable it.
+skip_steps = ["lec"]
+```
+
 ### Reports
 
-`ecc report qor` scores the workspace the same way the GUI project dashboard
-does (per-metric scores against fixed fail thresholds, dimension averages,
-weighted overall — weights are not renormalized over missing dimensions);
+`ecc report qor` delegates to the canonical QoR v3 Engine in
+`chipcompiler.analysis.qor`. The production v2 Snapshot `qorAssessment`
+projection remains available for GUI compatibility during the ECC-only
+rollout; it is not a second source for v3 conclusions.
 `ecc report checklist` renders the signoff checklist status, and `ecc report
 summary` writes the GUI-parity text design summary. All three write to
 `<workspace>/signoff/` by default and accept `-o` plus the usual
@@ -726,6 +805,7 @@ root = "/path/to/ics55"
 
 [flow]
 preset = "rtl2gds" # rtl2gds | syn_sta | synthesis_lec
+# Optional: skip_steps = ["lec"] (default); [] runs everything (enables LEC)
 ```
 
 For filelist mode, set `design.rtl` to a single filelist path, for example
@@ -818,8 +898,16 @@ Resolution priority for `get_pdk("ics55")` in `chipcompiler/data/pdk.py`:
 4. Default: `../pdk/icsprout55-pdk` next to the ecc checkout (the ecos-studio
    workspace location).
 
-Backend supports `POST /api/workspace/set_pdk_root` to set runtime path.
-Workspace creation persists the resolved root in `home/params.toml` as `pdk_root`.
+The runtime path is carried by the `pdkRoot` field of the RPC
+`workspace.create` request and, for CLI projects, by `ecc pdk set-root`.
+Workspace creation persists the resolved root in `home/params.toml` as `pdk_root`
+(under `[pdk] root`), so a workspace resolves identically on every machine.
+Loading an existing workspace whose persisted root is empty/missing still
+falls back to the environment variables, but `ecc run` then emits a
+`pdk_root_env_fallback` warning naming the variable it resolved from — the
+warning only fires when the workspace names the ics55 PDK (or no PDK at all),
+since those environment variables only apply to ics55. Run
+`ecc run --overwrite` to pin the root into the workspace.
 
 Example:
 

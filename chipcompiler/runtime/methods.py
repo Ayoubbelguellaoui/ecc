@@ -4,6 +4,7 @@ from typing import Any, Final, Generic, TypeVar
 from chipcompiler.runtime.requests import (
     DbEnsureRequest,
     DbReleaseRequest,
+    EmptyRequest,
     FloorplanEditInspectRequest,
     FloorplanEditRunAutoRequest,
     FloorplanEditValidateRequest,
@@ -17,15 +18,26 @@ from chipcompiler.runtime.requests import (
     OperationIdRequest,
     OperationStartFlowRequest,
     OperationStartStepRequest,
+    ProjectManifestDiscoverRequest,
+    ProjectManifestLoadRequest,
+    ProjectManifestMutationRequest,
     WorkspaceCloseRequest,
+    WorkspaceConfigurationUpdateRequest,
     WorkspaceCreateRequest,
+    WorkspaceDeriveRequest,
     WorkspaceExportSignoffRequest,
     WorkspaceIdRequest,
     WorkspaceInfoRequest,
     WorkspaceInspectSignoffRequest,
     WorkspaceOpenRequest,
     WorkspaceRecoverInterruptedRequest,
+    WorkspaceSpecOpenRequest,
+    WorkspaceSpecValidateRequest,
+    WorkspaceStepConfigurationReadRequest,
+    WorkspaceStepConfigurationUpdateRequest,
+    WorkspaceStepOutputsRequest,
     WorkspaceSyncConfigRequest,
+    WorkspaceUpdateRequest,
 )
 
 RequestT = TypeVar("RequestT")
@@ -40,6 +52,31 @@ class RuntimeMethodSpec(Generic[RequestT]):
 
 RUNTIME_METHODS: Final[tuple[RuntimeMethodSpec[Any], ...]] = (
     RuntimeMethodSpec(
+        method_name="workspace_spec.describe",
+        request_model=EmptyRequest,
+        handler_name="describe_workspace_spec",
+    ),
+    RuntimeMethodSpec(
+        method_name="workspace_spec.validate",
+        request_model=WorkspaceSpecValidateRequest,
+        handler_name="validate_workspace_spec",
+    ),
+    RuntimeMethodSpec(
+        method_name="project.discover",
+        request_model=ProjectManifestDiscoverRequest,
+        handler_name="discover_project",
+    ),
+    RuntimeMethodSpec(
+        method_name="project.manifest.load",
+        request_model=ProjectManifestLoadRequest,
+        handler_name="load_project_manifest",
+    ),
+    RuntimeMethodSpec(
+        method_name="project.manifest.mutate",
+        request_model=ProjectManifestMutationRequest,
+        handler_name="mutate_project_manifest",
+    ),
+    RuntimeMethodSpec(
         method_name="workspace.create",
         request_model=WorkspaceCreateRequest,
         handler_name="create_workspace",
@@ -48,6 +85,46 @@ RUNTIME_METHODS: Final[tuple[RuntimeMethodSpec[Any], ...]] = (
         method_name="workspace.open",
         request_model=WorkspaceOpenRequest,
         handler_name="open_workspace",
+    ),
+    RuntimeMethodSpec(
+        method_name="workspace.derive",
+        request_model=WorkspaceDeriveRequest,
+        handler_name="derive_workspace",
+    ),
+    RuntimeMethodSpec(
+        method_name="workspace.binding_requirement",
+        request_model=WorkspaceSpecOpenRequest,
+        handler_name="workspace_binding_requirement",
+    ),
+    RuntimeMethodSpec(
+        method_name="workspace.update",
+        request_model=WorkspaceUpdateRequest,
+        handler_name="update_workspace",
+    ),
+    RuntimeMethodSpec(
+        method_name="workspace.configuration.update",
+        request_model=WorkspaceConfigurationUpdateRequest,
+        handler_name="update_workspace_configuration",
+    ),
+    RuntimeMethodSpec(
+        method_name="workspace.configuration.read",
+        request_model=WorkspaceOpenRequest,
+        handler_name="read_workspace_configuration",
+    ),
+    RuntimeMethodSpec(
+        method_name="workspace.step_configuration.update",
+        request_model=WorkspaceStepConfigurationUpdateRequest,
+        handler_name="update_workspace_step_configuration",
+    ),
+    RuntimeMethodSpec(
+        method_name="workspace.step_configuration.read",
+        request_model=WorkspaceStepConfigurationReadRequest,
+        handler_name="read_workspace_step_configuration",
+    ),
+    RuntimeMethodSpec(
+        method_name="workspace.step_outputs",
+        request_model=WorkspaceStepOutputsRequest,
+        handler_name="workspace_step_outputs",
     ),
     RuntimeMethodSpec(
         method_name="workspace.close",
@@ -130,10 +207,36 @@ RUNTIME_METHODS: Final[tuple[RuntimeMethodSpec[Any], ...]] = (
         handler_name="workspace_snapshot",
     ),
     RuntimeMethodSpec(
+        method_name="workspace.engineering_snapshot",
+        request_model=WorkspaceIdRequest,
+        handler_name="engineering_snapshot",
+    ),
+    RuntimeMethodSpec(
         method_name="workspace.recover_interrupted",
         request_model=WorkspaceRecoverInterruptedRequest,
         handler_name="recover_interrupted",
     ),
+)
+
+# These methods were added with the v1 workspace contract. Older embedders may
+# provide only the legacy runtime API; expose a stable invalid-request result
+# until they upgrade instead of making the whole RPC server unstartable.
+OPTIONAL_RUNTIME_METHOD_NAMES: Final[frozenset[str]] = frozenset(
+    {
+        "workspace_spec.describe",
+        "workspace_spec.validate",
+        "project.discover",
+        "project.manifest.load",
+        "project.manifest.mutate",
+        "workspace.binding_requirement",
+        "workspace.update",
+        "workspace.configuration.update",
+        "workspace.configuration.read",
+        "workspace.step_configuration.update",
+        "workspace.step_configuration.read",
+        "workspace.step_outputs",
+        "workspace.engineering_snapshot",
+    }
 )
 
 

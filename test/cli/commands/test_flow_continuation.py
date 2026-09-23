@@ -3,9 +3,12 @@ import os
 from pathlib import Path
 
 from chipcompiler.cli import main as cli_main
+from chipcompiler.rtl2gds import build_rtl2gds_flow
 
 
-def _write_existing_workspace(run_dir, step_names, states=None, preset="rtl2gds", pdk_root=None):
+def _write_existing_workspace(
+    run_dir, step_names, states=None, preset="rtl2gds", pdk_root=None, extra=None
+):
     """A valid existing workspace: home/params.toml + flow.json with given steps."""
     from chipcompiler.data.workspace_config import save_workspace_config
     from chipcompiler.rtl2gds.builder import build_rtl2gds_flow
@@ -34,25 +37,14 @@ def _write_existing_workspace(run_dir, step_names, states=None, preset="rtl2gds"
     parameters = {"pdk": "ics55", "design": "gcd", "top_module": "gcd", "clock": "clk"}
     if pdk_root is not None:
         parameters["pdk_root"] = str(pdk_root)
+    if extra:
+        parameters.update(extra)
     assert save_workspace_config(run_dir, parameters, {"preset": preset})
 
 
 RTL2GDS_NAMES = [
-    "Synthesis",
-    "lec",
-    "Floorplan",
-    "place",
-    "CTS",
-    "legalization",
-    "Timing optimization",
-    "route",
-    "filler",
-    "RCX",
-    "sta",
-    "lvs",
-    "postRouteLec",
-    "drc",
-    "Harden",
+    step.value if hasattr(step, "value") else str(step)
+    for step, _tool, _state in build_rtl2gds_flow()
 ]
 
 
@@ -221,6 +213,84 @@ class TestFlowContinuation:
         warning = [r for r in records if r.get("warning") == "params_ignored_on_existing_run"]
         assert len(warning) == 1
 
+    def test_params_warning_carries_fix_commands_when_values_diverge(
+        self,
+        tmp_path,
+        capsys,
+        create_cli_project,
+        minimal_ics55_pdk_factory,
+        monkeypatch,
+        plain_records,
+    ):
+        pdk_root = minimal_ics55_pdk_factory(tmp_path / "ics55")
+        project_dir = create_cli_project(pdk_root=pdk_root)
+        monkeypatch.setattr(
+            "chipcompiler.cli.project.config._validate_pdk_contents",
+            lambda name, root, overrides=None: None,
+        )
+        with open(os.path.join(project_dir, "ecc.toml"), "a") as f:
+            f.write("\n[params.cts]\nmax_fanout = 16\n")
+        run_dir = os.path.join(project_dir, "default")
+        _write_existing_workspace(
+            run_dir, RTL2GDS_NAMES, pdk_root=pdk_root, extra={"max_fanout": 32}
+        )
+
+        class Flow:
+            def __init__(self, workspace):
+                self.workspace = workspace
+
+            def create_step_workspaces(self, *, executable_steps=None):
+                raise AssertionError("no-op run must not rebuild step workspaces")
+
+        monkeypatch.setattr("chipcompiler.engine.EngineFlow", Flow)
+
+        rc = cli_main.run(["run", "--project", project_dir, "--plain"])
+
+        assert rc == 0
+        records = _records(capsys, plain_records)
+        (warning,) = [r for r in records if r.get("warning") == "params_ignored_on_existing_run"]
+        assert warning["diverging_params"] == "cts.max_fanout"
+        assert "ecc param set cts.max_fanout 16 --workspace default" in warning["fix"]
+
+    def test_params_warning_stays_generic_when_values_match(
+        self,
+        tmp_path,
+        capsys,
+        create_cli_project,
+        minimal_ics55_pdk_factory,
+        monkeypatch,
+        plain_records,
+    ):
+        pdk_root = minimal_ics55_pdk_factory(tmp_path / "ics55")
+        project_dir = create_cli_project(pdk_root=pdk_root)
+        monkeypatch.setattr(
+            "chipcompiler.cli.project.config._validate_pdk_contents",
+            lambda name, root, overrides=None: None,
+        )
+        with open(os.path.join(project_dir, "ecc.toml"), "a") as f:
+            f.write("\n[params.cts]\nmax_fanout = 16\n")
+        run_dir = os.path.join(project_dir, "default")
+        _write_existing_workspace(
+            run_dir, RTL2GDS_NAMES, pdk_root=pdk_root, extra={"max_fanout": 16}
+        )
+
+        class Flow:
+            def __init__(self, workspace):
+                self.workspace = workspace
+
+            def create_step_workspaces(self, *, executable_steps=None):
+                raise AssertionError("no-op run must not rebuild step workspaces")
+
+        monkeypatch.setattr("chipcompiler.engine.EngineFlow", Flow)
+
+        rc = cli_main.run(["run", "--project", project_dir, "--plain"])
+
+        assert rc == 0
+        records = _records(capsys, plain_records)
+        (warning,) = [r for r in records if r.get("warning") == "params_ignored_on_existing_run"]
+        assert "diverging_params" not in warning
+        assert "fix" not in warning
+
     def test_malformed_workspace_config_is_config_invalid_not_invalid_workspace(
         self,
         tmp_path,
@@ -328,6 +398,38 @@ class TestFlowMismatchZeroMutation:
         assert _tree_snapshot(run_dir) == tree_before
         assert Path(manifest_path).read_bytes() == manifest_before
 
+    def test_manifest_declared_skip_policy_is_honored_on_existing_run(
+        self, tmp_path, capsys, create_cli_project, minimal_ics55_pdk_factory, plain_records
+    ):
+        """A per-workspace project.json skip policy wins over the
+        workspace's undeclared one on an existing run: enabling the LEC
+        (skip_steps = []) against a without-LEC ledger is a mismatch that
+        never inserts the step."""
+        pdk_root = minimal_ics55_pdk_factory(tmp_path / "ics55")
+        project_dir = create_cli_project(pdk_root=pdk_root)
+        run_dir = os.path.join(project_dir, "ws_0001")
+        # A post-default-policy ledger: the canonical chain without the LEC.
+        without_lec = [name for name in RTL2GDS_NAMES if name != "lec"]
+        prefix = without_lec[:3]
+        _write_existing_workspace(
+            run_dir, prefix, states=["Success"] * 2 + ["Unstart"], pdk_root=pdk_root
+        )
+
+        manifest_path = _write_manifest_with_workspace(project_dir, run_dir, pdk_root)
+        with open(manifest_path) as f:
+            document = json.load(f)
+        document["workspaces"][0]["skip_steps"] = []
+        with open(manifest_path, "w") as f:
+            json.dump(document, f, indent=2)
+
+        rc = cli_main.run(["run", "--project", project_dir, "--plain"])
+
+        assert rc != 0
+        errors = [r for r in _records(capsys, plain_records) if r.get("error") == "flow_mismatch"]
+        assert len(errors) == 1
+        ledger = json.loads((Path(run_dir) / "home" / "flow.json").read_text())
+        assert "lec" not in [step["name"] for step in ledger["steps"]]
+
     def test_legacy_parameters_mismatch_never_migrates(
         self, tmp_path, capsys, create_cli_project, minimal_ics55_pdk_factory, plain_records
     ):
@@ -413,13 +515,11 @@ class TestFlowMismatchZeroMutation:
         assert len(errors) == 1
         assert (external / "home" / "flow.json").read_bytes() == flow_before
 
-    def test_existing_run_rejects_symlinked_manifest_target(
+    def test_manifest_symlink_target_resolves_to_canonical_external_workspace(
         self, tmp_path, capsys, create_cli_project, minimal_ics55_pdk_factory, plain_records
     ):
-        """A declared workspace whose directory is a symlink into an
-        external tree never reaches the engine: the manifest layer rejects it
-        (manifest_invalid), with the dispatch ownership guard as the backup
-        line behind it. The external tree is left untouched either way."""
+        """A legacy absolute declaration through a symlink is normalized to
+        the exact external root and remains read-only during discovery."""
         pdk_root = minimal_ics55_pdk_factory(tmp_path / "ics55")
         project_dir = create_cli_project(pdk_root=pdk_root)
         external = tmp_path / "external-ws"
@@ -429,15 +529,11 @@ class TestFlowMismatchZeroMutation:
         _write_manifest_with_workspace(project_dir, run_dir, pdk_root)
 
         flow_before = (external / "home" / "flow.json").read_bytes()
-        rc = cli_main.run(["run", "--project", project_dir, "--plain"])
+        rc = cli_main.run(["status", "--project", project_dir, "--plain"])
 
-        assert rc != 0
-        errors = [
-            r
-            for r in _records(capsys, plain_records)
-            if r.get("error") in {"manifest_invalid", "run_target_unsafe"}
-        ]
-        assert len(errors) == 1
+        assert rc == 0
+        records = _records(capsys, plain_records)
+        assert records[0]["workspace"] == str(external.resolve())
         assert (external / "home" / "flow.json").read_bytes() == flow_before
 
     def test_flow_exception_marks_manifest_status_failed(

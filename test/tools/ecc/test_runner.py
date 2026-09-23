@@ -13,6 +13,7 @@ from chipcompiler.data import (
     EccStep,
     OriginDesign,
     Parameters,
+    SkippableStepEnum,
     StateEnum,
     StepEnum,
     StepInput,
@@ -114,11 +115,15 @@ class FakeSubFlow:
 )
 def test_run_analysis_switch(parameters, expected_calls, tmp_path, monkeypatch):
     workspace = Workspace(directory=tmp_path, parameters=Parameters(data=parameters))
-    step = EccStep(name=StepEnum.FLOORPLAN.value)
+    step = EccStep(name=StepEnum.POST_FLOORPLAN.value)
     metrics = Mock()
     plotter = Mock()
     checklist = Mock()
     monkeypatch.setattr(ecc_runner, "build_step_metrics", metrics)
+    # run_analysis resolves the plotter through the runner module global first
+    # (agent.tools installs an override there); clear any imported override so
+    # this test exercises the default plot-module resolution.
+    monkeypatch.delattr(ecc_runner, "ECCToolsPlot", raising=False)
     monkeypatch.setattr("chipcompiler.tools.ecc.plot.ECCToolsPlot", plotter)
     monkeypatch.setattr(ecc_runner, "EccChecklist", checklist)
 
@@ -129,6 +134,92 @@ def test_run_analysis_switch(parameters, expected_calls, tmp_path, monkeypatch):
     assert plotter.return_value.plot.call_count == expected_calls
     assert checklist.call_count == expected_calls
     assert checklist.return_value.check.call_count == expected_calls
+
+
+def test_split_floorplan_runs_pre_and_post_phases_independently(monkeypatch, tmp_path):
+    calls = []
+    saved_steps = []
+    analyzed_steps = []
+
+    class FakeFloorplanModule:
+        def init_fp(self, config):
+            calls.append(("init_fp", config))
+
+        def run_simple_fp(self):
+            calls.append(("run_simple_fp",))
+
+        def run_fp(self):
+            calls.append(("run_fp",))
+
+        def destroy_fp(self):
+            calls.append(("destroy_fp",))
+
+    floorplan_config = tmp_path / "floorplan_ecc.json"
+    floorplan_config.write_text(
+        json.dumps(
+            {
+                "macro_placer": {"mode": "file", "file_path": "old_locations.txt"},
+                "io_placer": {"mode": "file", "file_path": "io_pins.txt"},
+            }
+        )
+    )
+    simple_floorplan_config = floorplan_config.with_stem("floorplan_ecc_simple")
+    macro_location = tmp_path / "macro_location.tcl"
+    macro_location.write_text("# macro locations\n")
+    workspace = Workspace(
+        config={
+            StepEnum.FLOORPLAN.value: floorplan_config,
+            "macro_location": macro_location,
+        }
+    )
+    module = FakeFloorplanModule()
+
+    monkeypatch.setattr(ecc_runner, "EccSubFlow", FakeSubFlow)
+    monkeypatch.setattr(ecc_runner, "get_eda_instance", lambda **_kwargs: module)
+    monkeypatch.setattr(
+        ecc_runner,
+        "save_data",
+        lambda **kwargs: saved_steps.append(kwargs["step"].name) or True,
+    )
+    monkeypatch.setattr(
+        ecc_runner,
+        "run_analysis",
+        lambda **kwargs: analyzed_steps.append(kwargs["step"].name),
+    )
+
+    assert ecc_runner.run_pre_floorplan(
+        workspace=workspace,
+        step=EccStep(name=StepEnum.PRE_FLOORPLAN.value),
+    )
+    assert calls == [
+        ("init_fp", str(simple_floorplan_config)),
+        ("run_simple_fp",),
+        ("destroy_fp",),
+    ]
+    assert json.loads(simple_floorplan_config.read_text())["macro_placer"] == {
+        "mode": "auto",
+        "file_path": "",
+    }
+    assert json.loads(floorplan_config.read_text())["macro_placer"] == {
+        "mode": "file",
+        "file_path": "old_locations.txt",
+    }
+
+    assert ecc_runner.run_post_floorplan(
+        workspace=workspace,
+        step=EccStep(name=StepEnum.POST_FLOORPLAN.value),
+    )
+    assert calls[3:] == [
+        ("init_fp", str(floorplan_config)),
+        ("run_fp",),
+        ("destroy_fp",),
+    ]
+    assert json.loads(floorplan_config.read_text())["macro_placer"] == {
+        "mode": "file",
+        "file_path": str(macro_location),
+    }
+    assert saved_steps == [StepEnum.PRE_FLOORPLAN.value, StepEnum.POST_FLOORPLAN.value]
+    assert analyzed_steps == [StepEnum.POST_FLOORPLAN.value]
 
 
 class FakeRcxModule:
@@ -178,6 +269,7 @@ class SnapshotSaveEccModule:
     def __init__(self, *, write_snapshot: bool):
         self.write_snapshot = write_snapshot
         self.geometry_output = None
+        self.geometry_includes_drc = None
 
     def def_save(self, **_kwargs):
         return True
@@ -191,8 +283,9 @@ class SnapshotSaveEccModule:
     def save_data(self, **_kwargs):
         return True
 
-    def geometry_snapshot_save(self, output_dir):
+    def geometry_snapshot_save(self, output_dir, *, include_drc=False):
         self.geometry_output = output_dir
+        self.geometry_includes_drc = include_drc
         if not self.write_snapshot:
             return False
         Path(output_dir).mkdir(parents=True, exist_ok=True)
@@ -300,7 +393,7 @@ def test_create_db_engine_reads_replaced_step_input_despite_db(tmp_path, monkeyp
         config={"db": tmp_path / "config" / "db_ecc.json"},
     )
     step = EccStep(
-        name=StepEnum.TIMING_OPT.value,
+        name=SkippableStepEnum.TIMING_OPT.value,
         input=StepInput(
             def_=staging_def,
             verilog=staging_verilog,
@@ -335,7 +428,7 @@ def test_create_db_engine_raises_and_closes_when_def_master_resolution_fails(tmp
         config={"db": tmp_path / "config" / "db_ecc.json"},
     )
     step = EccStep(
-        name=StepEnum.TIMING_OPT.value,
+        name=SkippableStepEnum.TIMING_OPT.value,
         input=StepInput(def_=design_def, verilog=tmp_path / "origin" / "gcd.v", db=None),
         data=EccData(dir=tmp_path / "timing_optimization_sizer" / "data"),
         feature=EccFeature(dir=tmp_path / "timing_optimization_sizer" / "feature"),
@@ -406,7 +499,7 @@ def test_create_db_engine_without_input_db_does_not_retry_load_design(tmp_path, 
         logger=FakeLogger(),
     )
     step = EccStep(
-        name=StepEnum.TIMING_OPT.value,
+        name=SkippableStepEnum.TIMING_OPT.value,
         input=StepInput(def_=design_def, db=None),
         data=EccData(dir=tmp_path / "timing_optimization_sizer" / "data"),
         feature=EccFeature(dir=tmp_path / "timing_optimization_sizer" / "feature"),
@@ -867,6 +960,50 @@ def test_run_sta_uses_matched_report_and_feature_corner_directories(tmp_path, mo
     ]
 
 
+def test_run_sta_returns_false_when_sdc_is_missing(tmp_path, monkeypatch):
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    max_lib = tmp_path / "pdk" / "max.lib"
+    spef = tmp_path / "RCX_ecc" / "output" / "gcd_RCworst_125C.spef"
+    for path in (max_lib, spef):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("", encoding="utf-8")
+    sta_config = config_dir / "sta_ecc.json"
+    sta_config.write_text(
+        json.dumps(
+            {
+                "liberty": [{"corner": "MAX", "temperature": 125, "path": [str(max_lib)]}],
+                "signoff": [{"MAX": ["RCworst"]}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    rcx_config = config_dir / "rcx_ecc.json"
+    rcx_config.write_text(
+        json.dumps({"output": str(tmp_path / "RCX_ecc" / "data")}),
+        encoding="utf-8",
+    )
+    logger = FakeLogger()
+    workspace = Workspace(
+        directory=tmp_path,
+        design=OriginDesign(name="gcd", top_module="gcd"),
+        pdk=PDK(libs=[max_lib], sdc=None),
+        config={StepEnum.STA.value: sta_config, StepEnum.RCX.value: rcx_config},
+        logger=logger,
+    )
+    step = EccStep(
+        name=StepEnum.STA.value,
+        data=EccData(steps={StepEnum.STA.value: tmp_path / "sta_ecc" / "data" / "sta"}),
+        report=EccReport(dir=tmp_path / "sta_ecc" / "report"),
+        feature=EccFeature(dir=tmp_path / "sta_ecc" / "feature"),
+    )
+    monkeypatch.setattr(ecc_runner, "EccSubFlow", FakeSubFlow)
+    monkeypatch.setattr(ecc_runner, "get_eda_instance", lambda **kwargs: FakeSynthesisStaModule())
+
+    assert ecc_runner.run_sta(workspace, step) is False
+    assert logger.errors[0][0] == "STA SDC does not exist: %s"
+
+
 def test_rcx_checklist_strips_top_module_from_spef_corner(tmp_path):
     checklist = EccRcxChecklist.__new__(EccRcxChecklist)
     checklist.workspace = Workspace(
@@ -889,7 +1026,9 @@ def test_rcx_checklist_uses_top_module_for_spef_design_token(tmp_path):
     assert checklist.check_spef_file(str(spef)) is True
 
 
-@pytest.mark.parametrize("step_name", (StepEnum.ROUTING.value, StepEnum.LVS.value))
+@pytest.mark.parametrize(
+    "step_name", (StepEnum.ROUTING.value, StepEnum.LVS.value, StepEnum.DRC.value)
+)
 def test_save_data_writes_geometry_snapshot_for_physical_step(tmp_path, step_name):
     workspace = Workspace(directory=tmp_path, design=OriginDesign(name="gcd", top_module="gcd"))
     step = build_step(workspace, step_name, None, None)
@@ -897,6 +1036,7 @@ def test_save_data_writes_geometry_snapshot_for_physical_step(tmp_path, step_nam
 
     assert ecc_runner.save_data(workspace, step, module, feature_step=False) is True
     assert module.geometry_output == step.output.geometry
+    assert module.geometry_includes_drc is (step_name == StepEnum.DRC.value)
     assert step.output.geometry_manifest is not None
     assert step.output.geometry_manifest.is_file()
 

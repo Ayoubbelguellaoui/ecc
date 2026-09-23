@@ -14,14 +14,30 @@ from chipcompiler.runtime.requests import (
     FlowRunStepRequest,
     OperationStartFlowRequest,
     WorkspaceCreateRequest,
+    WorkspaceDeriveRequest,
     WorkspaceIdRequest,
     WorkspaceInfoRequest,
     WorkspaceOpenRequest,
     WorkspaceRecoverInterruptedRequest,
+    WorkspaceStepConfigurationReadRequest,
     WorkspaceSyncConfigRequest,
 )
-from chipcompiler.runtime.sessions import WorkspaceSessionRegistry
+from chipcompiler.runtime.sessions import WorkspaceSession, WorkspaceSessionRegistry
 from chipcompiler.runtime.workspace_api import RuntimeApiError, WorkspaceRuntimeApi
+
+
+def test_legacy_flow_request_without_revision_remains_compatible(tmp_path):
+    session = WorkspaceSession(
+        workspace_id="workspace-1",
+        directory=tmp_path,
+        workspace=object(),
+        workspace_revision=2,
+    )
+
+    WorkspaceRuntimeApi._validate_workspace_revision(
+        session,
+        FlowRunRequest(workspace_id="workspace-1").expected_workspace_revision,
+    )
 
 
 class DummyEngineDB:
@@ -194,7 +210,7 @@ def _install_runtime_mocks(monkeypatch, tmp_path, *, create_workspace_files=True
             )
         return _workspace(Path(kwargs["directory"]))
 
-    def fake_load_workspace(directory):
+    def fake_load_workspace(directory, *, read_only=False):
         capture["loaded"].append(directory)
         return _workspace(Path(directory))
 
@@ -207,7 +223,7 @@ def _install_runtime_mocks(monkeypatch, tmp_path, *, create_workspace_files=True
     monkeypatch.setattr("chipcompiler.engine.EngineFlow", DummyFlow)
     monkeypatch.setattr(
         "chipcompiler.rtl2gds.build_rtl2gds_flow",
-        lambda: [("Synthesis", "yosys", "Unstart")],
+        lambda *, skip=(): [("Synthesis", "yosys", "Unstart")],
     )
 
     ws = tmp_path / "workspace"
@@ -217,6 +233,21 @@ def _install_runtime_mocks(monkeypatch, tmp_path, *, create_workspace_files=True
         (ws / "home" / "flow.json").write_text(json.dumps({"steps": []}))
         (ws / "home" / "home.json").write_text("{}")
     return capture, ws
+
+
+def test_runtime_workspace_defaults_to_rtl2gds_flow(monkeypatch):
+    from chipcompiler.runtime.workspace_api import build_flow_for_workspace
+
+    workspace = SimpleNamespace(flow=SimpleNamespace(data={}))
+    monkeypatch.setattr("chipcompiler.engine.EngineFlow", DummyFlow)
+    monkeypatch.setattr(
+        "chipcompiler.rtl2gds.build_rtl2gds_flow",
+        lambda *, skip: [("rtl2gds", "ecc", "Unstart")],
+    )
+
+    flow = build_flow_for_workspace(workspace)
+
+    assert flow.added_steps == [("rtl2gds", "ecc", "Unstart")]
 
 
 def _assert_call_waits_for_session_lock(api, workspace_id, call, entered):
@@ -282,6 +313,25 @@ def test_create_workspace_forwards_dynamic_flow_config(monkeypatch, tmp_path):
     )
 
     assert capture["create_kwargs"]["flow_config"] == flow_config
+
+
+def test_create_workspace_rejects_invalid_skip_steps_before_sidecars(monkeypatch, tmp_path):
+    capture, ws = _install_runtime_mocks(monkeypatch, tmp_path)
+    api = WorkspaceRuntimeApi()
+
+    with pytest.raises(RuntimeApiError, match="skip_steps") as exc_info:
+        api.create_workspace(
+            WorkspaceCreateRequest(
+                directory=str(ws),
+                rtl_list=["a.v"],
+                flow_config={"skip_steps": "lec"},
+            )
+        )
+
+    assert exc_info.value.code == "config_error"
+    # The failure happened before any materialization: no workspace creation
+    # call, and the temp filelist was never written.
+    assert capture["create_kwargs"] is None
 
 
 def test_create_workspace_writes_rtl_list_filelist_outside_workspace(
@@ -403,6 +453,53 @@ def test_open_workspace_loads_without_creating_step_workspaces(monkeypatch, tmp_
     assert not DummyFlow.instances[0].created
 
 
+def test_open_workspace_reuses_engineering_snapshot_identity(monkeypatch, tmp_path):
+    _capture, ws = _install_runtime_mocks(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        "chipcompiler.engine.snapshot.read_engineering_snapshot",
+        lambda _workspace: {"workspaceId": "cli-workspace", "workspaceRevision": 7},
+    )
+    api = WorkspaceRuntimeApi()
+
+    result = api.open_workspace(WorkspaceOpenRequest(directory=str(ws)))
+
+    assert result == {
+        "workspaceId": "cli-workspace",
+        "workspaceRevision": 7,
+        "directory": str(ws.resolve()),
+    }
+
+
+def test_step_configuration_keeps_cli_workspace_identity_after_open(monkeypatch, tmp_path):
+    _capture, ws = _install_runtime_mocks(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        "chipcompiler.engine.snapshot.read_engineering_snapshot",
+        lambda _workspace: {"workspaceId": "cli-workspace", "workspaceRevision": 7},
+    )
+    monkeypatch.setattr(
+        "chipcompiler.engine.read_step_configuration",
+        lambda _workspace, _step: {
+            "step": "Synthesis",
+            "stepId": "Synthesis",
+            "parameters": [],
+            "workspaceId": "cli-workspace",
+            "workspaceRevision": 7,
+        },
+    )
+    api = WorkspaceRuntimeApi()
+    opened = api.open_workspace(WorkspaceOpenRequest(directory=str(ws)))
+
+    result = api.read_workspace_step_configuration(
+        WorkspaceStepConfigurationReadRequest(
+            step="Synthesis",
+            workspace_id=opened["workspaceId"],
+        )
+    )
+
+    assert result["workspaceId"] == opened["workspaceId"]
+    assert result["workspaceRevision"] == opened["workspaceRevision"]
+
+
 def test_recover_interrupted_is_marker_scoped_and_idempotent(monkeypatch, tmp_path):
     _capture, ws = _install_runtime_mocks(monkeypatch, tmp_path)
     api = WorkspaceRuntimeApi()
@@ -520,6 +617,47 @@ def test_recover_interrupted_is_marker_scoped_and_idempotent(monkeypatch, tmp_pa
     ) == {"recovered": []}
 
 
+def test_recover_interrupted_returns_committed_workspace_revision(monkeypatch, tmp_path):
+    _capture, ws = _install_runtime_mocks(monkeypatch, tmp_path)
+    api = WorkspaceRuntimeApi()
+    workspace_id = api.open_workspace(WorkspaceOpenRequest(directory=str(ws)))["workspaceId"]
+    session = api.sessions.get_session(workspace_id)
+    session.workspace.flow.data = {
+        "steps": [
+            {
+                "name": "place",
+                "tool": "dreamplace",
+                "state": "Ongoing",
+                "info": {
+                    "runtime_operation": {
+                        "schema": 1,
+                        "operation_id": "operation-1",
+                        "runtime_instance_id": "runtime-old",
+                        "started_at": 1.0,
+                    }
+                },
+            },
+        ]
+    }
+    home = ws / "home"
+    home.mkdir(parents=True, exist_ok=True)
+    (home / "engineering-snapshot.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(
+        "chipcompiler.engine.snapshot.commit_engineering_snapshot",
+        lambda _workspace, *, workspace_id, cause: {
+            "workspaceId": workspace_id,
+            "workspaceRevision": 2,
+        },
+    )
+
+    result = api.recover_interrupted(
+        WorkspaceRecoverInterruptedRequest(workspace_id, "operation-1")
+    )
+
+    assert result["workspaceRevision"] == 2
+    assert session.workspace_revision == 2
+
+
 def test_create_workspace_replaces_existing_same_directory_session(monkeypatch, tmp_path):
     _capture, ws = _install_runtime_mocks(monkeypatch, tmp_path)
     api = WorkspaceRuntimeApi()
@@ -586,10 +724,11 @@ def test_refresh_sync_and_reset_flow_use_session(monkeypatch, tmp_path):
         "chipcompiler.data.sync_workspace_config_to_parameters",
         lambda workspace, path: synced.append((workspace.directory, path)) or True,
     )
-    monkeypatch.setattr(
-        "chipcompiler.data.prepare_workspace_for_rerun",
-        lambda workspace, flow, **_kwargs: prepared.append((workspace.directory, flow)),
-    )
+
+    def prepare(workspace, flow, **kwargs):
+        prepared.append((workspace.directory, flow, kwargs.get("preserve_user_inputs")))
+
+    monkeypatch.setattr("chipcompiler.data.prepare_workspace_for_rerun", prepare)
     config_dir = ws / "config"
     config_dir.mkdir()
     config_path = config_dir / "route.json"
@@ -616,7 +755,7 @@ def test_refresh_sync_and_reset_flow_use_session(monkeypatch, tmp_path):
     assert reset == {"directory": str(ws.resolve())}
     assert refreshed == [ws.resolve(), ws.resolve()]
     assert synced == [(ws.resolve(), config_path.resolve())]
-    assert prepared == [(ws.resolve(), DummyFlow.instances[-1])]
+    assert prepared == [(ws.resolve(), DummyFlow.instances[-1], True)]
 
 
 def test_refresh_config_releases_active_session_db(monkeypatch, tmp_path):
@@ -923,6 +1062,76 @@ def test_runtime_modules_do_not_import_typer_or_click():
         assert "import click" not in source
 
 
+def test_workspace_snapshot_includes_configuration_and_engineering_snapshot(monkeypatch, tmp_path):
+    _capture, ws = _install_runtime_mocks(monkeypatch, tmp_path)
+    configuration = {
+        "workspaceId": "workspace-1",
+        "workspaceRevision": 2,
+        "workspaceSpec": {"design": {"name": "gcd"}},
+        "workspaceBindings": {},
+    }
+    monkeypatch.setattr(
+        "chipcompiler.engine.read_workspace_configuration",
+        lambda _workspace: configuration,
+    )
+    api = WorkspaceRuntimeApi()
+    monkeypatch.setattr(
+        api,
+        "_read_engineering_snapshot",
+        lambda _owner: {"workspaceId": "workspace-1", "workspaceRevision": 2},
+    )
+    workspace_id = api.open_workspace(WorkspaceOpenRequest(directory=str(ws)))["workspaceId"]
+    session = api.sessions.get_session(workspace_id)
+    session.workspace.parameters = SimpleNamespace(data={}, path=ws / "home" / "params.toml")
+    session.workspace.home.data = {}
+
+    snapshot = api.workspace_snapshot(WorkspaceIdRequest(workspace_id))
+
+    assert snapshot["configuration"] == configuration
+    assert snapshot["engineeringSnapshot"] == {
+        "workspaceId": "workspace-1",
+        "workspaceRevision": 2,
+    }
+
+
+def test_workspace_snapshot_falls_back_to_persisted_flow_steps(monkeypatch, tmp_path):
+    _capture, ws = _install_runtime_mocks(monkeypatch, tmp_path)
+    api = WorkspaceRuntimeApi()
+    workspace_id = api.open_workspace(WorkspaceOpenRequest(directory=str(ws)))["workspaceId"]
+    workspace = api.sessions.get_session(workspace_id).workspace
+    flow = workspace.flow
+    flow.data = {}
+    workspace.parameters = SimpleNamespace(data={}, path=ws / "home" / "parameters.json")
+    workspace.home = SimpleNamespace(data={})
+    monkeypatch.setattr(
+        flow,
+        "steps",
+        lambda: [{"name": "Synthesis", "tool": "yosys", "state": "Success"}],
+        raising=False,
+    )
+    monkeypatch.setattr(
+        api,
+        "_read_engineering_snapshot",
+        lambda _owner: {"workspaceId": "workspace-1", "workspaceRevision": 1},
+    )
+    monkeypatch.setattr(
+        "chipcompiler.engine.read_workspace_configuration",
+        lambda _workspace: {},
+    )
+
+    snapshot = api.workspace_snapshot(WorkspaceIdRequest(workspace_id))
+
+    assert snapshot["flow"]["steps"] == [
+        {
+            "name": "Synthesis",
+            "tool": "yosys",
+            "state": "Success",
+            "runtime": "",
+            "peakMemory": 0,
+        }
+    ]
+
+
 def test_flow_run_uses_run_steps_and_prepare_on_rerun(monkeypatch, tmp_path):
     _capture, ws = _install_runtime_mocks(monkeypatch, tmp_path)
     prepared = []
@@ -934,6 +1143,26 @@ def test_flow_run_uses_run_steps_and_prepare_on_rerun(monkeypatch, tmp_path):
     workspace_id = api.open_workspace(WorkspaceOpenRequest(directory=str(ws)))["workspaceId"]
 
     result = api.flow_run(FlowRunRequest(workspace_id=workspace_id, rerun=True))
+
+    flow = DummyFlow.instances[-1]
+    assert result == {"rerun": True}
+    assert prepared == [(ws.resolve(), flow, {"preserve_user_inputs": True})]
+    assert flow.run_steps_calls == [True]
+
+
+def test_flow_run_reset_runtime_params_opts_out_of_preservation(monkeypatch, tmp_path):
+    _capture, ws = _install_runtime_mocks(monkeypatch, tmp_path)
+    prepared = []
+    monkeypatch.setattr(
+        "chipcompiler.data.prepare_workspace_for_rerun",
+        lambda workspace, flow, **kwargs: prepared.append((workspace.directory, flow, kwargs)),
+    )
+    api = WorkspaceRuntimeApi()
+    workspace_id = api.open_workspace(WorkspaceOpenRequest(directory=str(ws)))["workspaceId"]
+
+    result = api.flow_run(
+        FlowRunRequest(workspace_id=workspace_id, rerun=True, reset_runtime_params=True)
+    )
 
     flow = DummyFlow.instances[-1]
     assert result == {"rerun": True}
@@ -1614,3 +1843,392 @@ def test_build_workspace_step_for_info_forwards_db_from_any_predecessor(tmp_path
         assert next_step.input.db == Path(db_value)
     else:
         assert next_step.input.db is None
+
+
+_DERIVE_SOURCE_SNAPSHOT_ID = "source-workspace"
+
+
+class _DeriveFlowRecord:
+    def __init__(self, step):
+        self._step = step
+
+    def update(self, values):
+        self._step.update(values)
+
+
+class _DeriveFlow:
+    def __init__(self, workspace):
+        from chipcompiler.data.step import step_storage_name
+
+        self.workspace = workspace
+        self.workspace_steps = []
+        for step in workspace.flow.data.get("steps", []):
+            step_dir = Path(workspace.directory) / (
+                f"{step_storage_name(step['name'], step['tool'])}_{step['tool']}"
+            )
+            self.workspace_steps.append(
+                SimpleNamespace(
+                    name=step["name"],
+                    tool=step["tool"],
+                    directory=step_dir,
+                    output={"dir": step_dir / "output"},
+                    data={},
+                    feature={},
+                    analysis={},
+                    report={},
+                    log={},
+                    subflow=None,
+                    checklist=None,
+                )
+            )
+
+    def get_step(self, name, tool):
+        for step in self.workspace.flow.data.get("steps", []):
+            if step.get("name") == name and step.get("tool") == tool:
+                return _DeriveFlowRecord(step)
+        return None
+
+    def save(self):
+        Path(self.workspace.flow.path).write_text(
+            json.dumps(self.workspace.flow.data), encoding="utf-8"
+        )
+
+
+def _make_derive_source(tmp_path):
+    source = (tmp_path / "source-ws").resolve()
+    home = source / "home"
+    steps = [
+        {"name": "Synthesis", "tool": "yosys", "state": "Success", "runtime": "10s"},
+        {"name": "Floorplan", "tool": "ecc", "state": "Success", "runtime": "20s"},
+        {"name": "Route", "tool": "ecc", "state": "Success", "runtime": "30s"},
+    ]
+    (source / "Synthesis_yosys" / "output").mkdir(parents=True)
+    (source / "Synthesis_yosys" / "output" / "synth.v").write_text("verilog", encoding="utf-8")
+    (source / "Floorplan_ecc" / "output").mkdir(parents=True)
+    (source / "Floorplan_ecc" / "output" / "fp.png").write_text("layout", encoding="utf-8")
+    (source / "Route_ecc" / "output").mkdir(parents=True)
+    home.mkdir(parents=True)
+    (home / "flow.json").write_text(
+        json.dumps({"path": str(home / "flow.json"), "steps": steps}), encoding="utf-8"
+    )
+    (home / "home.json").write_text(
+        json.dumps(
+            {
+                "parameters": str(home / "params.toml"),
+                "flow": str(home / "flow.json"),
+                "layout": str(source / "Floorplan_ecc" / "output" / "fp.png"),
+                "checklist": str(home / "checklist.json"),
+                "metrics": {
+                    "instances dist.": str(source / "Synthesis_yosys" / "output" / "dist.png"),
+                    "pin dist.": str(source / "Route_ecc" / "output" / "pin.png"),
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    (home / "params.toml").write_text("", encoding="utf-8")
+    (home / "engineering-snapshot.json").write_text(
+        json.dumps(
+            {
+                "schemaVersion": 2,
+                "workspaceId": _DERIVE_SOURCE_SNAPSHOT_ID,
+                "workspaceRevision": 3,
+                "cause": "workspace.updated",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (home / "workspace-commands.json").write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "commands": {
+                    "cmd-0": {
+                        "fingerprint": "old",
+                        "result": {
+                            "workspaceId": _DERIVE_SOURCE_SNAPSHOT_ID,
+                            "workspaceRevision": 3,
+                        },
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    (home / "runtime-commands.json").write_text(json.dumps({"operations": []}), encoding="utf-8")
+    (home / "checklist.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 3,
+                "kind": "signoff_checklist",
+                "checker_revision": "signoff-v1",
+                "generated_at": "2026-09-16T00:00:00Z",
+                "status": "ready",
+                "summary": {"passed": 2, "blocked": 1, "attention": 0, "unavailable": 0},
+                "checklist": [
+                    {
+                        "step": "Synthesis",
+                        "category": "report",
+                        "title": "Synth check",
+                        "owner": "checklist",
+                        "policy": "warn",
+                        "state": "pass",
+                    },
+                    {
+                        "step": "Floorplan",
+                        "category": "report",
+                        "title": "FP check",
+                        "owner": "checklist",
+                        "policy": "warn",
+                        "state": "pass",
+                    },
+                    {
+                        "step": "Route",
+                        "category": "report",
+                        "title": "Route check",
+                        "owner": "checklist",
+                        "policy": "block",
+                        "state": "failed",
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    return source
+
+
+def _install_derive_mocks(monkeypatch):
+    def fake_load_workspace(directory, *, read_only=False):
+        directory = Path(directory)
+        flow_path = directory / "home" / "flow.json"
+        home_path = directory / "home" / "home.json"
+        workspace = SimpleNamespace(
+            directory=directory.resolve(),
+            design=SimpleNamespace(name="gcd"),
+            flow=SimpleNamespace(
+                path=flow_path,
+                data=json.loads(flow_path.read_text(encoding="utf-8")),
+            ),
+            parameters=SimpleNamespace(data={}, path=None),
+            home=SimpleNamespace(
+                path=home_path,
+                data=json.loads(home_path.read_text(encoding="utf-8")),
+            ),
+        )
+
+        def save(home=workspace.home):
+            home.path.write_text(json.dumps(home.data), encoding="utf-8")
+
+        workspace.home.save = save
+        return workspace
+
+    def fake_prepare_workspace_for_rerun(workspace, engine_flow, **_kwargs):
+        for step in workspace.flow.data.get("steps", []):
+            step.update({"state": "Unstart", "runtime": "", "peak memory (mb)": 0, "info": {}})
+        Path(workspace.flow.path).write_text(json.dumps(workspace.flow.data), encoding="utf-8")
+        checklist_path = Path(workspace.directory) / "home" / "checklist.json"
+        workspace.home.data["checklist"] = str(checklist_path)
+        workspace.home.data["layout"] = ""
+        workspace.home.data["metrics"] = {}
+        workspace.home.save()
+        checklist_path.write_text(
+            json.dumps({"path": str(checklist_path), "checklist": []}), encoding="utf-8"
+        )
+
+    monkeypatch.setattr("chipcompiler.data.load_workspace", fake_load_workspace)
+    monkeypatch.setattr(
+        "chipcompiler.data.prepare_workspace_for_rerun", fake_prepare_workspace_for_rerun
+    )
+    monkeypatch.setattr(
+        "chipcompiler.runtime.workspace_api.build_flow_for_workspace",
+        lambda workspace, **kwargs: _DeriveFlow(workspace),
+    )
+
+
+def _tree_digest(root: Path):
+    import hashlib
+
+    return {
+        str(path.relative_to(root)): hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+    }
+
+
+def test_derive_workspace_returns_fresh_identity_and_preserves_source(monkeypatch, tmp_path):
+    source = _make_derive_source(tmp_path)
+    _install_derive_mocks(monkeypatch)
+    source_digest = _tree_digest(source)
+    target = tmp_path / "derived-ws"
+    api = WorkspaceRuntimeApi()
+
+    result = api.derive_workspace(
+        WorkspaceDeriveRequest(
+            directory=str(source),
+            target_directory=str(target),
+            command_id="cmd-derive",
+        )
+    )
+
+    assert _tree_digest(source) == source_digest
+    assert result["directory"] == str(target.resolve())
+    assert result["workspaceId"] != _DERIVE_SOURCE_SNAPSHOT_ID
+    assert result["workspaceRevision"] == 1
+    assert not (target / "home" / "runtime-commands.json").exists()
+    snapshot = json.loads((target / "home" / "engineering-snapshot.json").read_text("utf-8"))
+    assert snapshot["workspaceId"] == result["workspaceId"]
+    assert snapshot["workspaceRevision"] == 1
+    assert snapshot["cause"] == "workspace.derived"
+    commands = json.loads((target / "home" / "workspace-commands.json").read_text("utf-8"))
+    assert list(commands["commands"]) == ["cmd-derive"]
+    assert commands["commands"]["cmd-derive"]["result"]["workspaceId"] == result["workspaceId"]
+    flow = json.loads((target / "home" / "flow.json").read_text("utf-8"))
+    assert all(step["state"] == "Unstart" for step in flow["steps"])
+    checklist = json.loads((target / "home" / "checklist.json").read_text("utf-8"))
+    assert checklist["checklist"] == []
+
+    opened = api.open_workspace(WorkspaceOpenRequest(directory=str(target)))
+    assert opened == {
+        "workspaceId": result["workspaceId"],
+        "workspaceRevision": 1,
+        "directory": str(target.resolve()),
+    }
+
+
+def test_derive_workspace_resets_only_step_suffix(monkeypatch, tmp_path):
+    source = _make_derive_source(tmp_path)
+    _install_derive_mocks(monkeypatch)
+    source_digest = _tree_digest(source)
+    target = tmp_path / "derived-ws"
+    api = WorkspaceRuntimeApi()
+
+    result = api.derive_workspace(
+        WorkspaceDeriveRequest(
+            directory=str(source),
+            target_directory=str(target),
+            reset_from_step="Floorplan",
+        )
+    )
+
+    assert _tree_digest(source) == source_digest
+    assert result["workspaceRevision"] == 1
+    assert not (target / "home" / "runtime-commands.json").exists()
+
+    flow = json.loads((target / "home" / "flow.json").read_text("utf-8"))
+    states = {step["name"]: step["state"] for step in flow["steps"]}
+    assert states == {"Synthesis": "Success", "Floorplan": "Unstart", "Route": "Unstart"}
+    assert (target / "Synthesis_yosys" / "output" / "synth.v").read_text("utf-8") == "verilog"
+    assert list((target / "Floorplan_ecc" / "output").iterdir()) == []
+    assert list((target / "Route_ecc" / "output").iterdir()) == []
+
+    home = json.loads((target / "home" / "home.json").read_text("utf-8"))
+    assert home["layout"] == ""
+    assert home["metrics"] == {
+        "instances dist.": str(target.resolve() / "Synthesis_yosys" / "output" / "dist.png")
+    }
+
+    checklist = json.loads((target / "home" / "checklist.json").read_text("utf-8"))
+    assert [item["step"] for item in checklist["checklist"]] == ["Synthesis"]
+    assert checklist["summary"] == {"passed": 1, "blocked": 0, "attention": 0, "unavailable": 0}
+
+    snapshot = json.loads((target / "home" / "engineering-snapshot.json").read_text("utf-8"))
+    assert snapshot["workspaceId"] == result["workspaceId"]
+    snapshot_states = {step["name"]: step["state"] for step in snapshot["flow"]["steps"]}
+    assert snapshot_states == states
+
+
+def test_derive_workspace_rewrites_artifact_paths_before_snapshot_digest(monkeypatch, tmp_path):
+    source = _make_derive_source(tmp_path)
+    artifact_dir = source / "Synthesis_yosys" / "analysis"
+    artifact_dir.mkdir(parents=True)
+    (artifact_dir / "qor_metrics.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 3,
+                "metrics": [],
+                "report_root": str(source / "Synthesis_yosys"),
+            }
+        ),
+        encoding="utf-8",
+    )
+    _install_derive_mocks(monkeypatch)
+    target = tmp_path / "derived-ws"
+    api = WorkspaceRuntimeApi()
+
+    result = api.derive_workspace(
+        WorkspaceDeriveRequest(
+            directory=str(source),
+            target_directory=str(target),
+            reset_from_step="Floorplan",
+        )
+    )
+
+    derived_artifact = json.loads(
+        (target / "Synthesis_yosys" / "analysis" / "qor_metrics.json").read_text("utf-8")
+    )
+    assert derived_artifact["report_root"] == str(target.resolve() / "Synthesis_yosys")
+    opened = api.open_workspace(WorkspaceOpenRequest(directory=str(target)))
+    assert opened["workspaceId"] == result["workspaceId"]
+
+
+def _register_workspace_in_project(project_dir, ws, workspace_id="ws_0001"):
+    from chipcompiler.project.manifest_write import (
+        build_manifest_document,
+        write_manifest_if_absent,
+    )
+
+    document = build_manifest_document(
+        str(project_dir),
+        design_name="gcd",
+        base_design={"parameters": {"design": "gcd"}},
+        workspace_id=workspace_id,
+        workspace_path=str(ws),
+        start_step="Synth",
+        end_step="Harden",
+        status="not_started",
+    )
+    write_manifest_if_absent(str(project_dir), document)
+
+
+def _manifest_workspace_status(project_dir, workspace_id="ws_0001"):
+    document = json.loads((Path(project_dir) / "project.json").read_text())
+    (entry,) = [w for w in document["workspaces"] if w["workspace_id"] == workspace_id]
+    return entry["status"]
+
+
+def test_flow_run_writes_terminal_status_to_project_manifest(monkeypatch, tmp_path):
+    _capture, ws = _install_runtime_mocks(monkeypatch, tmp_path)
+    _register_workspace_in_project(tmp_path, ws)
+    api = WorkspaceRuntimeApi()
+    workspace_id = api.open_workspace(WorkspaceOpenRequest(directory=str(ws)))["workspaceId"]
+
+    result = api.flow_run(FlowRunRequest(workspace_id=workspace_id, rerun=False))
+
+    assert result == {"rerun": False}
+    assert _manifest_workspace_status(tmp_path) == "success"
+
+
+def test_flow_run_failure_writes_failed_status_to_project_manifest(monkeypatch, tmp_path):
+    _capture, ws = _install_runtime_mocks(monkeypatch, tmp_path)
+    _register_workspace_in_project(tmp_path, ws)
+    DummyFlow.next_run_states = [StateEnum.Imcomplete]
+    api = WorkspaceRuntimeApi()
+    workspace_id = api.open_workspace(WorkspaceOpenRequest(directory=str(ws)))["workspaceId"]
+
+    with pytest.raises(RuntimeApiError) as exc_info:
+        api.flow_run(FlowRunRequest(workspace_id=workspace_id, rerun=False))
+
+    assert exc_info.value.code == "command_failed"
+    assert _manifest_workspace_status(tmp_path) == "failed"
+
+
+def test_flow_run_without_manifest_project_skips_write_back(monkeypatch, tmp_path):
+    _capture, ws = _install_runtime_mocks(monkeypatch, tmp_path)
+    api = WorkspaceRuntimeApi()
+    workspace_id = api.open_workspace(WorkspaceOpenRequest(directory=str(ws)))["workspaceId"]
+
+    result = api.flow_run(FlowRunRequest(workspace_id=workspace_id, rerun=False))
+
+    assert result == {"rerun": False}
+    assert not (tmp_path / "project.json").exists()

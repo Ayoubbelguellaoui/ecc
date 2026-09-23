@@ -66,7 +66,7 @@ def flow_mocks(monkeypatch):
     monkeypatch.setattr("chipcompiler.engine.EngineFlow", DummyFlow)
     monkeypatch.setattr(
         "chipcompiler.rtl2gds.builder.build_rtl2gds_flow",
-        lambda: [("Synthesis", "yosys", "Unstart")],
+        lambda *, skip=(): [("Synthesis", "yosys", "Unstart")],
     )
     monkeypatch.setattr(
         "chipcompiler.cli.project.config._validate_pdk_contents",
@@ -160,7 +160,7 @@ def legacy_hint():
 
 @pytest.fixture
 def create_legacy_workspace():
-    """Factory: a real runs/<run_id> workspace with a Synthesis..Floorplan
+    """Factory: a real runs/<run_id> workspace with a Synthesis..postFloorplan
     flow ledger cut from the canonical chain.
 
     *states* holds (first step state, last step state); steps between them
@@ -192,7 +192,7 @@ def create_legacy_workspace():
             for step, tool, _state in build_rtl2gds_flow()
         ]
         tools = dict(chain)
-        names = flow_steps_in_range("Synthesis", "Floorplan")
+        names = flow_steps_in_range("Synthesis", "postFloorplan")
         step_states = [states[0]] * (len(names) - 1) + [states[1]]
         steps = [
             {
@@ -210,3 +210,33 @@ def create_legacy_workspace():
         return run_dir
 
     return _create
+
+
+@pytest.fixture
+def set_flow_preset():
+    """Set [flow] preset in a project's ecc.toml."""
+
+    def _set(project_dir, preset):
+        toml_path = os.path.join(project_dir, "ecc.toml")
+        with open(toml_path) as f:
+            content = f.read()
+        content = content.replace('preset = "rtl2gds"', f'preset = "{preset}"')
+        with open(toml_path, "w") as f:
+            f.write(content)
+
+    return _set
+
+
+@pytest.fixture
+def patch_all_flow_builders():
+    """Patch every preset builder with a distinctive two-step stub chain."""
+
+    def _patch(monkeypatch):
+        markers = {}
+        for attr in ("build_rtl2gds_flow", "build_syn_sta_flow", "build_synthesis_lec_flow"):
+            steps = [("Synthesis", "yosys", "Unstart"), (attr, "ecc", "Unstart")]
+            markers[attr] = steps
+            monkeypatch.setattr(f"chipcompiler.rtl2gds.builder.{attr}", lambda steps=steps: steps)
+        return markers
+
+    return _patch

@@ -68,12 +68,12 @@ PROTECTED_FIELDS = {
         ("base_design_name",),
         ("def_input",),
         ("lef_input",),
+        ("macro_only",),
         ("result_dir",),
         ("verilog_input",),
     },
     "route": {("RT", "-temp_directory_path")},
     "RCX": {("output",)},
-    "sta": {("liberty",)},
 }
 
 

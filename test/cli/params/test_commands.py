@@ -80,6 +80,57 @@ class TestParamSet:
         assert record["value"] == "0.65"
         assert record["source"] == "ecc.toml"
 
+    def test_param_set_discloses_fresh_run_scope_and_workspace_hint(
+        self, tmp_path, capsys, create_cli_project, plain_records
+    ):
+        project_dir = create_cli_project()
+        rc = cli_main.run(
+            ["param", "set", "place.target_density", "0.65", "--project", project_dir, "--plain"]
+        )
+
+        assert rc == 0
+        (record,) = plain_records(capsys.readouterr().out)
+        assert record["applies_to"] == "next fresh/overwrite run"
+        assert (
+            "ecc param set place.target_density <value> --workspace NAME"
+            in record["workspace_hint"]
+        )
+
+    def test_param_set_lists_registered_workspaces(
+        self, tmp_path, capsys, create_cli_project, plain_records
+    ):
+        project_dir = create_cli_project()
+        manifest = {
+            "schema_version": 1,
+            "design_name": "gcd",
+            "root_path": project_dir,
+            "base_design": {
+                "pdk": "ics55",
+                "pdk_root": str(tmp_path / "ics55"),
+                "top_module": "gcd",
+                "clock": "clk",
+                "rtl_list": ["rtl/gcd.v"],
+                "parameters": {"design": "gcd", "frequency_max": 100},
+            },
+            "workspaces": [
+                {
+                    "workspace_id": "ws_0001",
+                    "workspace_path": os.path.join(project_dir, "ws_0001"),
+                    "status": "success",
+                }
+            ],
+        }
+        with open(os.path.join(project_dir, "project.json"), "w") as f:
+            json.dump(manifest, f)
+
+        rc = cli_main.run(
+            ["param", "set", "place.target_density", "0.65", "--project", project_dir, "--plain"]
+        )
+
+        assert rc == 0
+        (record,) = plain_records(capsys.readouterr().out)
+        assert record["registered_workspaces"] == "ws_0001"
+
     def test_param_set_rejects_unknown_key(self, tmp_path, capsys, create_cli_project):
         project_dir = create_cli_project()
         rc = cli_main.run(["param", "set", "bogus.key", "5", "--project", project_dir])
@@ -240,7 +291,7 @@ class TestRunSet:
         )
         monkeypatch.setattr(
             "chipcompiler.rtl2gds.builder.build_rtl2gds_flow",
-            lambda: [("Synthesis", "yosys", "Unstart")],
+            lambda *, skip=(): [("Synthesis", "yosys", "Unstart")],
         )
         monkeypatch.setattr(
             "chipcompiler.cli.project.config._validate_pdk_contents",
@@ -294,7 +345,7 @@ class TestRunSet:
         )
         monkeypatch.setattr(
             "chipcompiler.rtl2gds.builder.build_rtl2gds_flow",
-            lambda: [("Synthesis", "yosys", "Unstart")],
+            lambda *, skip=(): [("Synthesis", "yosys", "Unstart")],
         )
         monkeypatch.setattr(
             "chipcompiler.cli.project.config._validate_pdk_contents",
@@ -378,7 +429,7 @@ class TestRunSet:
         )
         monkeypatch.setattr(
             "chipcompiler.rtl2gds.builder.build_rtl2gds_flow",
-            lambda: [("Synthesis", "yosys", "Unstart")],
+            lambda *, skip=(): [("Synthesis", "yosys", "Unstart")],
         )
         monkeypatch.setattr(
             "chipcompiler.cli.project.config._validate_pdk_contents",
@@ -418,7 +469,7 @@ class TestOutputContracts:
         assert rc == 0
         out = capsys.readouterr().out
         lines = [line for line in out.strip().split("\n") if line.strip()]
-        assert len(lines) == 14
+        assert len(lines) == 15
 
 
 class TestConfigResolved:
@@ -440,7 +491,7 @@ class TestConfigResolved:
         assert rc == 0
         records = plain_records(capsys.readouterr().out)
         param_records = [r for r in records if r.get("kind") == "param"]
-        assert len(param_records) == 14
+        assert len(param_records) == 15
         first_param = param_records[0]
         assert "source" in first_param
         assert "maps_to" in first_param
@@ -509,7 +560,7 @@ class TestPrettyOutput:
         assert rc == 0
         out = capsys.readouterr().out
         lines = [line for line in out.strip().split("\n") if line.strip()]
-        assert len(lines) == 14
+        assert len(lines) == 15
         assert "\033[" not in out
 
     def test_param_show_default_is_pretty(self, tmp_path, capsys, create_cli_project):

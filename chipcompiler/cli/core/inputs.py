@@ -220,6 +220,49 @@ class WorkspaceRefreshInput:
     output: OutputOptions
     project: ProjectOptions
     workspace: str
+    force: bool = False
+
+
+@dataclass(frozen=True)
+class WorkspaceImportInput:
+    output: OutputOptions
+    project: ProjectOptions
+    workspace: str
+    path: str
+
+
+@dataclass(frozen=True)
+class MacroSetInput:
+    output: OutputOptions
+    project: ProjectOptions
+    instance: str
+    x: float
+    y: float
+    orientation: str
+    workspace: str | None = None
+
+
+@dataclass(frozen=True)
+class MacroRemoveInput:
+    output: OutputOptions
+    project: ProjectOptions
+    instance: str
+    workspace: str | None = None
+
+
+@dataclass(frozen=True)
+class MacroShowInput:
+    output: OutputOptions
+    project: ProjectOptions
+    workspace: str | None = None
+
+
+@dataclass(frozen=True)
+class MacroImportInput:
+    output: OutputOptions
+    project: ProjectOptions
+    path: str
+    workspace: str | None = None
 
 
 def output_options(*, plain: bool) -> OutputOptions:

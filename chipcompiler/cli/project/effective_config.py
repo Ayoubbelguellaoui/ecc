@@ -37,6 +37,72 @@ def _resolve_entry(manifest, run_name: str | None):
     return active[0] if len(active) == 1 else None
 
 
+def declared_skip_steps(entry, cfg) -> list | None:
+    """The declared skip policy: ecc.toml wins over the project.json entry.
+
+    Same precedence direction as every other key — the manifest entry is
+    the base layer and an explicit ecc.toml value overrides it. None means
+    neither surface declared a policy (the code default applies downstream);
+    [] is an explicit run-everything.
+    """
+    if "flow.skip_steps" in getattr(cfg, "_explicit_keys", frozenset()):
+        return list(getattr(cfg, "flow_skip_steps", None) or [])
+    if entry is not None and getattr(entry, "skip_steps", None) is not None:
+        return list(entry.skip_steps)
+    return None
+
+
+def skip_steps_shadow_warning(entry, cfg) -> dict | None:
+    """The skip_steps_shadowed warning when both surfaces declare the policy
+    with different effective values.
+
+    Only an explicit ecc.toml declaration can shadow the manifest entry (the
+    base layer), and only a genuinely different policy: alias spellings and
+    list order normalize away before comparison.
+    """
+    if entry is None or "flow.skip_steps" not in getattr(cfg, "_explicit_keys", frozenset()):
+        return None
+    manifest_value = getattr(entry, "skip_steps", None)
+    if manifest_value is None:
+        return None
+    from chipcompiler.rtl2gds.builder import resolve_skip_steps
+
+    toml_effective = resolve_skip_steps({"skip_steps": list(cfg.flow_skip_steps or [])})
+    manifest_effective = resolve_skip_steps({"skip_steps": list(manifest_value)})
+    if toml_effective == manifest_effective:
+        return None
+    return warning_record(
+        "skip_steps_shadowed",
+        effective_source="ecc.toml",
+        shadowed_source="project.json",
+        reason="ecc.toml [flow] skip_steps overrides the project.json workspace entry; "
+        "remove the ecc.toml key to let the project.json entry apply",
+    )
+
+
+def _attach_skip_steps(flow_config: dict | None, skip_steps: list | None) -> dict | None:
+    """Carry a declared skip policy on the flow config (policy-only when
+    the config selects no steps)."""
+    if skip_steps is None:
+        return flow_config
+    if flow_config is None:
+        return {"skip_steps": skip_steps}
+    flow_config = dict(flow_config)
+    flow_config["skip_steps"] = skip_steps
+    return flow_config
+
+
+def flow_config_selects_steps(flow_config) -> bool:
+    """Whether a flow config names steps (a range or explicit selection).
+
+    A policy-only config (just ``skip_steps``) selects nothing: it must
+    not satisfy a flow-target requirement nor trigger range preflight.
+    """
+    if not isinstance(flow_config, dict):
+        return False
+    return bool(flow_config.get("start_step")) or bool(flow_config.get("steps"))
+
+
 def resolve_effective_config(
     ctx, run_name: str | None, cfg: "ProjectConfig | None"
 ) -> "CommandResult | tuple[ProjectConfig, dict | None, list[dict]]":
@@ -73,7 +139,20 @@ def resolve_effective_config(
             if "flow.preset" not in cfg._explicit_keys:
                 flow_config = {"start_step": entry.start_step, "end_step": entry.end_step}
 
+    # skip_steps follows the common precedence: an explicit ecc.toml
+    # declaration outranks the manifest entry (the base layer).
+    declared = declared_skip_steps(entry, cfg)
+    flow_config = _attach_skip_steps(flow_config, declared)
+    # Provenance for inspection surfaces: the winning layer's name.
+    if declared is not None:
+        cfg._skip_steps_source = (
+            "ecc.toml" if "flow.skip_steps" in cfg._explicit_keys else "project.json"
+        )
+
     warnings = []
+    shadowed = skip_steps_shadow_warning(entry, cfg)
+    if shadowed is not None:
+        warnings.append(shadowed)
     diverging = layer_divergences(cfg, assembled, entry)
     if diverging:
         warnings.append(
@@ -243,7 +322,7 @@ def validate_effective(ctx, cfg, *, fresh: bool, flow_config, cli_overrides=None
         sources = cfg.design_rtl if len(cfg.design_rtl) > 1 else cfg.design_rtl[1:]
         for entry in sources:
             errors.extend(_validate_rtl_source(cfg.project_dir, entry))
-        if fresh and not cfg.flow_preset and flow_config is None:
+        if fresh and not cfg.flow_preset and not flow_config_selects_steps(flow_config):
             errors.append(
                 "no flow target: set flow.preset in ecc.toml or declare the workspace's "
                 "start/end range in project.json"
@@ -410,6 +489,10 @@ def layer_divergences(cfg, assembled: dict, entry) -> list[str]:
 def _backend_leaf_keys(schema) -> tuple[str, ...]:
     """The flattened backend key names a schema's maps_to target produces."""
     maps_to = schema.maps_to
+    # Direct config/PDK parameters are applied through their explicit target
+    # and intentionally have no legacy backend projection.
+    if maps_to is None:
+        return ()
     if isinstance(maps_to, str):
         return (maps_to,)
     return tuple(".".join((subtree, leaf)) for subtree, leaf in maps_to.items())
@@ -439,7 +522,10 @@ def _diverging_lower_keys(overrides: dict, resolve_lower) -> tuple[list[str], se
             continue
         coerced, type_err = _validate_schema_type(lower_value, schema)
         if type_err or coerced != override_value:
-            diverging.extend(leaf_keys)
+            # Direct config/PDK parameters have no backend leaf key. Keep the
+            # warning useful by identifying the canonical parameter instead
+            # of silently dropping the divergence or inventing a key.
+            diverging.extend(leaf_keys or [dotted])
     return diverging, compared
 
 

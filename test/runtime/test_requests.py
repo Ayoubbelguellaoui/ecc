@@ -19,6 +19,7 @@ from chipcompiler.runtime.requests import (
     RequestValidationError,
     WorkspaceCloseRequest,
     WorkspaceCreateRequest,
+    WorkspaceDeriveRequest,
     WorkspaceExportSignoffRequest,
     WorkspaceIdRequest,
     WorkspaceInfoRequest,
@@ -76,6 +77,11 @@ def test_workspace_create_maps_camel_case_fields_and_preserves_pdk_json():
     ("method", "params", "request_type"),
     [
         ("workspace.open", {"directory": "/work/ws"}, WorkspaceOpenRequest),
+        (
+            "workspace.derive",
+            {"directory": "/work/ws", "targetDirectory": "/work/ws-copy"},
+            WorkspaceDeriveRequest,
+        ),
         ("workspace.close", {"workspaceId": "ws-1"}, WorkspaceCloseRequest),
         ("workspace.home", {"workspaceId": "ws-1"}, WorkspaceIdRequest),
         ("workspace.refresh_config", {"workspaceId": "ws-1"}, WorkspaceIdRequest),
@@ -126,6 +132,22 @@ def test_first_slice_payloads_parse_to_typed_request_models(method, params, requ
 
     assert isinstance(request, request_type)
     assert is_dataclass(request)
+
+
+def test_flow_run_parses_reset_runtime_params_and_defaults_to_preserving():
+    request = _parse_runtime_request(
+        "flow.run", {"workspaceId": "ws-1", "rerun": True, "resetRuntimeParams": True}
+    )
+
+    assert request == FlowRunRequest(workspace_id="ws-1", rerun=True, reset_runtime_params=True)
+
+    default_request = _parse_runtime_request("flow.run", {"workspaceId": "ws-1"})
+    assert default_request.reset_runtime_params is False
+
+
+def test_flow_run_rejects_non_boolean_reset_runtime_params():
+    with pytest.raises(RequestValidationError, match="reset_runtime_params"):
+        _parse_runtime_request("flow.run", {"workspaceId": "ws-1", "resetRuntimeParams": "yes"})
 
 
 @pytest.mark.parametrize(
@@ -220,6 +242,28 @@ def test_layout_edit_begin_accepts_source_fingerprint_alias():
 
     assert isinstance(request, LayoutEditBeginRequest)
     assert request.expected_source_fingerprint == "abc123"
+
+
+def test_layout_edit_save_accepts_write_macro_location_alias():
+    request = _parse_runtime_request(
+        "layout.edit.save",
+        {"editSessionId": "layout-edit-1", "expectedRevision": 1, "writeMacroLocation": True},
+        persistent_db_enabled=True,
+    )
+
+    assert isinstance(request, LayoutEditSaveRequest)
+    assert request.write_macro_location is True
+
+
+def test_write_macro_location_must_be_boolean():
+    with pytest.raises(RequestValidationError) as exc_info:
+        _parse_runtime_request(
+            "layout.edit.save",
+            {"editSessionId": "layout-edit-1", "expectedRevision": 1, "writeMacroLocation": "yes"},
+            persistent_db_enabled=True,
+        )
+
+    assert exc_info.value.reason == "write_macro_location must be a boolean"
 
 
 def test_missing_required_field_reports_field_name():

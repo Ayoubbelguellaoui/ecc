@@ -80,12 +80,12 @@ uv run ecc --help
 ## 1. 通用约定
 
 - 全局：`ecc --version`（单行版本号）、`ecc --help`。
-- 项目定位：项目级命令接受 `--project <dir>`（缺省为当前目录）。`--workspace <名称>` 是项目内受管的、非空单路径段名称，不能传文件系统路径。新项目裸执行 `ecc run` 创建 `default`；只有一个活跃 workspace 时自动选择，多个活跃 workspace 时必须指定 `--workspace`。命名 workspace 会在创建文件前登记到 `project.json`。遗留的 `runs/` 项目必须先执行 `ecc migrate`。每个项目只有一个 `ecc.toml`；创建时会把声明的输入复制到各 workspace 的 `origin/`。
+- 项目定位：项目级命令接受 `--project <dir>`（缺少参数指定即为当前目录）。`--workspace <路径指定>` 可以是受工具管理的非空简单文件夹路径，也可以是完整绝对路径。名称继续使用项目内的 `<project>/<workspace-id>` 布局；绝对路径创建或选择项目外 workspace，新路径默认以目录 basename 作为 workspace ID，已登记路径沿用清单中的 ID。新项目裸执行 `ecc run` 创建 `default`；只有一个活跃 workspace 时自动选择，多个活跃 workspace 时必须指定 `--workspace`。命名 workspace 会在创建文件前登记到 `project.json`。遗留的 `runs/` 项目必须先执行 `ecc migrate`。每个项目只有一个 `ecc.toml`；创建时会把声明的输入复制到各 workspace 的 `origin/`。
 - 结构化输出：`init`、`check`、`run`、`status`、`log`、`config`、`migrate`、`doctor`、`param`、`pdk`、`project`、`workspace`、`signoff`、`report` 都支持 `--plain`（`key=value`，便于脚本解析），缺省为人类可读 TEXT。`rpc serve` 和 `layout-image` 使用各自的协议。
 - 退出码：成功 0；业务失败 1（错误记录形如 `[error] error=<机器可读错误码>`）。
 - 步骤名（step token）有三套写法，按场景区分：
-  - **展示名**（`ecc status` / `ecc log` / `ecc report step` 的输出与入参，统一小写/下划线）：`synthesis / lec / floorplan / placement / cts / legalization / timing_optimization / routing / filler / rcx / sta / lvs / postroutelec / drc / harden`；
-  - **持久化名**（`home/flow.json` 中的原始名；已有 workspace 上的 `--from`/`--only`/`--to` 必须用它，如 `place`、`CTS`、`Timing optimization`）：`Synthesis / lec / Floorplan / place / CTS / legalization / Timing optimization / route / filler / RCX / sta / lvs / postRouteLec / drc / Harden`；
+  - **展示名**（`ecc status` / `ecc log` / `ecc report step` 的输出与入参，统一小写/下划线）：`synthesis / lec / pre_floorplan / macro_placement / post_floorplan / placement / cts / legalization / timing_optimization / routing / filler / rcx / sta / lvs / postroutelec / drc / harden`；
+  - **持久化名**（`home/flow.json` 中的原始名；已有 workspace 上的 `--from`/`--only`/`--to` 必须用它，如 `place`、`CTS`、`Timing optimization`）：`Synthesis / lec / preFloorplan / macroPlacement / postFloorplan / place / CTS / legalization / Timing optimization / route / filler / RCX / sta / lvs / postRouteLec / drc / Harden`；
   - **新建范围时的别名**（首次 `--from A --to B` 建 workspace 会做别名归一化，两种拼法都接受）：如 `cts`↔`CTS`、`route`↔`routing`、`timingopt`↔`Timing optimization`、`postlec`↔`postRouteLec`。
   拼错时返回 `unknown_step` 并列出全部可用步骤名，照抄即可。
 
@@ -111,7 +111,6 @@ Commands:
   workspace     Refresh managed workspaces from project configuration
   signoff       Inspect and export signoff packages
   report        Generate design-summary, QoR score, checklist, and step reports
-  rpc           Run the private ECC JSON-RPC runtime
 ```
 
 ## 1.5. doc — 在终端阅读内置指南
@@ -203,6 +202,8 @@ root = ""                # icsprout55-pdk 路径；留空则用 CHIPCOMPILER_ICS
 [flow]
 # preset: rtl2gds | syn_sta | synthesis_lec
 preset = "rtl2gds"
+# LEC is skipped by default; clear the list to enable it.
+skip_steps = ["lec"]
 ```
 
 ## 4. check — 校验项目配置
@@ -315,7 +316,7 @@ yosys -Q -T -p "help read_slang" 2>&1 | grep -q "No such command" \
 ```bash
 ecc run [OPTIONS]
   --project TEXT     项目目录（缺省 cwd）
-  --workspace TEXT   创建、选择或续跑一个受管 workspace 名称
+  --workspace TEXT   创建、选择或续跑 workspace 名称或绝对路径
   --resume           从第一个非成功步骤继续
   --from TEXT        从一个步骤重跑，或与 --to 配对创建范围 workspace
   --to TEXT          有界范围的包含式终点（必须与 --from 同用）
@@ -327,9 +328,28 @@ ecc run [OPTIONS]
   --plain           面向脚本的 key=value 输出
 ```
 
-新建或 `--overwrite` 的 workspace 会按以下流程执行：读 `ecc.toml` → 只解析入口步骤所需的设计文件以及 PDK/参数 → 预检所需工具 → 先写入 `project.json` 登记 → 在 `<project>/<workspace 名称>` 创建 workspace → 将声明的设计输入复制到 `origin/`、写入对应步骤配置并运行 flow。workspace 不会存放第二份项目输入清单。已有 workspace 按持久化 flow 续跑，不会改写已有输入或步骤配置。`rtl2gds` 是完整 15 步链（Synthesis→LEC（Yosys 等价性检查）→Floorplan→place→CTS→legalization→Timing optimization（sizer）→route→filler→RCX→sta→LVS→postRouteLec（Yosys 等价性检查）→DRC→Harden，Harden 产出 GDS + 抽象 LEF + 时序 LIB）。
+新建或 `--overwrite` 的 workspace 会按以下流程执行：读 `ecc.toml` → 只解析入口步骤所需的设计文件以及 PDK/参数 → 预检所需工具 → 先写入 `project.json` 登记 → `--workspace` 是名称时默认在 `<project>/<workspace 名称>` 创建，是绝对路径时在该完整目录创建 → 将声明的设计输入复制到 `origin/`、写入对应步骤配置并运行 flow。绝对路径必须是完整的项目外目录且父目录已存在；新路径以 basename 作为 workspace ID，已登记路径沿用清单中的 ID。外部目录中已有有效 ECC workspace 时，也可以用同一命令登记并续跑。workspace 不会存放第二份项目输入清单。已有 workspace 按持久化 flow 续跑，不会改写已有输入或步骤配置。`rtl2gds` 是完整 17 步链（Synthesis→LEC（Yosys 等价性检查；默认跳过——`[flow] skip_steps` 默认为 `["lec"]`，设为 `[]` 才启用）→preFloorplan→macroPlacement→postFloorplan→place→CTS→legalization→Timing optimization（sizer）→route→filler→RCX→sta→LVS→postRouteLec（Yosys 等价性检查）→DRC→Harden，Harden 产出 GDS + Abstract LEF + 时序 LIB）。
 
-运行结束打印汇总（真实输出）：
+#### 外部 workspace 路径
+
+当 workspace 必须放在项目目录外时，把完整绝对目录直接作为 `--workspace` 的路径参数。它表示 workspace 的完整目录，不是父目录：
+
+```bash
+# 原有行为：在项目下创建并登记 workspace。
+ecc run --project /projects/gcd --workspace <project-local-path>
+
+# 在项目外创建并运行受工具管理的 workspace。
+ecc run --project /projects/gcd \
+  --workspace /data/ecc-runs/gcd/archive
+
+# 登记后按清单中的 ID 选择外部 workspace。
+ecc run --project /projects/gcd --workspace archive --resume
+ecc status --project /projects/gcd --workspace archive
+```
+
+路径必须是绝对路径。`ecc` 只创建最后一级目录，因此父目录必须已存在；已有非空目录必须已经是有效 ECC workspace。项目根目录和 legacy `runs/` 目录是受项目保护目录，包含项目目录的路径也会被拒绝。同一个 workspace ID 不能重新绑定到另一个路径，已登记给其他 ID 的路径也不能重复使用。要登记已有 workspace 但不执行或修改它，请使用 `ecc workspace import`。
+
+`synthesis_lec` preset 需要默认策略跳过的 LEC，因此本示例的项目先编辑 `ecc.toml`（`sed -i 's/skip_steps = \["lec"\]/skip_steps = []/' ecc.toml` 或手动修改）显式设置 `skip_steps = []`：
 
 ```console
 $ ecc run --preset synthesis_lec
@@ -383,7 +403,7 @@ ecc run --workspace cts-only --from cts --to cts      # 新建范围 workspace�
 ecc run --workspace cts-route --from cts --to routing # 同上；两端都接受别名
 ```
 
-新建范围 workspace 时只校验**入口步骤**所需的设计输入：Synthesis 要 `rtl`；LEC/postRouteLec 要 `netlist` + `golden_netlist`；Floorplan 要 `netlist`；物理步骤（place/CTS/legalization/timing optimization/route/filler/rcx/drc/lvs/harden）要 `def` + `netlist`；sta 还要 `spef`；`sdc` 声明了才校验。缺输入时按 `step_input_missing` 报错：
+新建范围 workspace 时只校验**入口步骤**所需的设计输入：Synthesis 要 `rtl`；LEC/postRouteLec 要 `netlist` + `golden_netlist`；preFloorplan 要 `netlist`；macroPlacement、postFloorplan 和其余物理步骤（place/CTS/legalization/timing optimization/route/filler/rcx/drc/lvs/harden）要 `def` + `netlist`；sta 还要 `spef`；`sdc` 声明了才校验。缺输入时按 `step_input_missing` 报错：
 
 ```console
 $ ecc run --from cts --to route          # 新建范围但缺 def/netlist
@@ -393,19 +413,19 @@ $ ecc run --from cts --to route          # 新建范围但缺 def/netlist
 rc=1
 ```
 
-例如，要复用已有 workspace `2` 的 Floorplan 产物，新建一个只跑 placement 到 routing 的 workspace，先把**匹配的一对** DEF 和门级网表声明为新 workspace 的入口输入，再创建范围 flow：
+例如，要复用已有 workspace `2` 的 post-floorplan 产物，新建一个只跑 placement 到 routing 的 workspace，先把**匹配的一对** DEF 和门级网表声明为新 workspace 的入口输入，再创建范围 flow：
 
 ```bash
 PROJECT=~/projects/benchmark/gcd
-SOURCE="$PROJECT/2/Floorplan_ecc/output"
+SOURCE="$PROJECT/2/postFloorplan_ecc/output"
 
-ecc project set design.def "$SOURCE/gcd_Floorplan.def.gz" --project "$PROJECT"
-ecc project set design.netlist "$SOURCE/gcd_Floorplan.v.gz" --project "$PROJECT"
+ecc project set design.def "$SOURCE/gcd_postFloorplan.def.gz" --project "$PROJECT"
+ecc project set design.netlist "$SOURCE/gcd_postFloorplan.v.gz" --project "$PROJECT"
 ecc run --project "$PROJECT" --workspace floorplan-2-place-route \
   --from placement --to routing
 ```
 
-`ecc run` 不提供 `--def` 或 `--netlist` 选项；范围入口从 `ecc.toml` 的 `design.def` / `design.netlist` 读取。这个例子会在 `project.json` 中登记 `floorplan-2-place-route`，将两个文件复制到新 workspace 的 `origin/`，并从 placement 开始执行至 routing（不重跑 Floorplan）。由于前两条命令会改动项目级 `ecc.toml`，它们也影响之后新建的 workspace；若原先未声明这些字段，可在创建完成后用 `ecc project unset design.def --project "$PROJECT"` 和 `ecc project unset design.netlist --project "$PROJECT"` 恢复项目默认入口。
+`ecc run` 不提供 `--def` 或 `--netlist` 选项；范围入口从 `ecc.toml` 的 `design.def` / `design.netlist` 读取。这个例子会在 `project.json` 中登记 `floorplan-2-place-route`，将两个文件复制到新 workspace 的 `origin/`，并从 placement 开始执行至 routing（不重跑 postFloorplan）。由于前两条命令会改动项目级 `ecc.toml`，它们也影响之后新建的 workspace；若原先未声明这些字段，可在创建完成后用 `ecc project unset design.def --project "$PROJECT"` 和 `ecc project unset design.netlist --project "$PROJECT"` 恢复项目默认入口。
 
 ### 5.2 workspace 模式（调试/复跑）
 
@@ -418,13 +438,14 @@ ecc run [--workspace NAME] [--resume | --from STEP [--to STEP] | --only STEP [--
 - 新 workspace 必须同时给出 `--from` 与 `--to`，动态构建这段包含式 flow；
 - `--only STEP [--force]`：只跑一步，`--force` 用于该步已成功时强制重跑；
 - `--resume`、`--only` 与范围选择互斥；新建范围不能与 `--preset`、`--resume`、`--only`、`--force`、`--overwrite` 组合；`--workspace` 可与 `--project` 组合；
+- `--workspace` 可以是单段名称或绝对路径。绝对路径用于创建或登记项目外目标；登记后所有按 workspace 作用域的命令都可以使用清单中的 ID；
 - **已有 workspace 上的 `--from`/`--only`/`--to` 必须用持久化名**（`home/flow.json` 中的原始名，见第 1 节词表，如 `place`、`CTS`、`Timing optimization`）；新建范围（`--from A --to B` 同时给出）才接受小写别名。拼错时报 `unknown_step` 并列出全部可用名：
 
 ```console
 $ ecc run --workspace default --from synthesis   # 持久化名是 "Synthesis"
 [error]
-  unknown_step unknown step 'synthesis'; available steps: Synthesis, lec, Floorplan,
-  place, CTS, legalization, Timing optimization, route, filler, RCX, sta, lvs,
+  unknown_step unknown step 'synthesis'; available steps: Synthesis, lec, preFloorplan,
+  macroPlacement, postFloorplan, place, CTS, legalization, Timing optimization, route, filler, RCX, sta, lvs,
   postRouteLec, drc, Harden
   workspace: /tmp/gcd/default
 ```
@@ -473,9 +494,14 @@ $ ecc run --workspace a/b     # workspace 必须是单段名称，不能是路�
 |---|---|---|
 | `run_exists` | 目标目录已存在但不是有效 ECC workspace（无 `home/flow.json`） | `--overwrite`（有安全校验）或换 `--workspace` |
 | `overwrite_refused` | `--overwrite` 的目标不是真正的 ECC workspace 目录 | 人工确认目录内容后手动清理 |
-| `invalid_workspace` | workspace 名含 `/`、是绝对路径或 `.`/`..`；或目录不是可加载的 workspace | 换合规名称 / 检查目录 |
+| `invalid_workspace` | workspace 名含 `/`、是相对路径或 `.`/`..`；或目录不是可加载的 workspace | 使用简单名称（如 myproject）或完整绝对路径 / 检查目录（如 /home/user/myproject） |
 | `workspace_required` | 项目有多个活跃 workspace 但没传 `--workspace` | 按报错列出的名称指定其一 |
 | `workspace_not_declared` | `--workspace` 名与 `project.json` 声明的 id 不一致（含别名指向已声明路径） | 使用报错中给出的已声明 id |
+| `workspace_path_not_absolute` | 导入路径不是绝对路径 | 为 `workspace import` 传入绝对 workspace 目录 |
+| `workspace_path_unsafe` | 路径是项目根目录、legacy `runs/` 目录、包含项目目录，或父目录不存在 | 选择安全目录，并确保父目录已存在 |
+| `workspace_id_conflict` | workspace ID 已登记在另一个路径 | 使用已登记的 ID/路径，或更换目录 basename |
+| `workspace_path_conflict` | 规范化后的路径已登记给另一个 workspace ID | 使用已登记 ID 或更换目录 |
+| `workspace_not_importable` | 目录不是受支持的 ECC workspace，或其 design/PDK 身份与项目不匹配 | 指向该项目的有效 workspace |
 | `workspace_conflict` | 同名 workspace 已声明在另一个路径 | 换名称 |
 | `workspace_registration_failed` | 向 `project.json` 登记新 workspace 失败（清单不可写等） | 检查 `project.json` 可读写后重试 |
 | `legacy_workspace_migration_required` | 在 legacy `runs/` 项目上执行 `ecc run` | 先 `ecc migrate`（提示记录会给出完整命令） |
@@ -523,8 +549,12 @@ $ ecc status
       log: ecc log synthesis --workspace default
     lec (yosys_lec) success 0:0:1
       log: ecc log lec --workspace default
-    floorplan (ecc) success 0:0:1
-      log: ecc log floorplan --workspace default
+    pre_floorplan (ecc) success 0:0:1
+      log: ecc log pre_floorplan --workspace default
+    macro_placement (dreamplace) success 0:0:5
+      log: ecc log macro_placement --workspace default
+    post_floorplan (ecc) success 0:0:1
+      log: ecc log post_floorplan --workspace default
     placement (dreamplace) incomplete
       log: ecc log placement --workspace default
     cts (ecc) unstart
@@ -619,7 +649,21 @@ ecc project unset design.spef
 ecc project show [KEY]
 ```
 
-`ecc workspace refresh NAME --project DIR` 用当前 `ecc.toml` 重建一个已在 `project.json` 声明的 workspace，但不执行 flow。它会替换该 workspace 的复制输入、工具配置、状态和产物；完成后再执行 `ecc run --workspace NAME`。`ecc run --workspace NAME --overwrite` 则是刷新后立即执行的既有快捷方式：
+`ecc workspace import WORKSPACE --path DIR --project PROJECT` 把已有 ECC workspace 登记到 `project.json`，不执行 flow、不修改 workspace 内文件，也不移动目录。`WORKSPACE` 是后续命令使用的逻辑 ID；`--path` 必填且必须是完整绝对目录。导入会只读检查持久化 flow、状态、design、PDK 和参数，然后原子地登记路径：
+
+```bash
+ecc workspace import archive \
+  --project /projects/gcd \
+  --path /data/ecc-runs/gcd/archive
+
+# 导入后按 ID 选择 workspace。
+ecc status --project /projects/gcd --workspace archive
+ecc run --project /projects/gcd --workspace archive --resume
+```
+
+导入会拒绝格式错误或不兼容的 workspace、重复 ID/路径、受保护路径，以及仍需先执行 `ecc migrate` 的 legacy 项目。如果只有 `ecc.toml` 而还没有 `project.json`，成功导入时会先创建 schema-v1 manifest，再登记该 workspace。
+
+`ecc workspace refresh NAME --project DIR` 用当前 `ecc.toml` 重建一个已在 `project.json` 声明的 workspace，但不执行 flow。它会在清单已声明的路径上替换该 workspace 的复制输入、工具配置、状态和产物；完成后再执行 `ecc run --workspace NAME`。`ecc run --workspace NAME --overwrite` 则是刷新后立即执行的既有快捷方式：
 
 ```console
 $ ecc workspace refresh default
@@ -682,7 +726,7 @@ $ ecc param list
     floorplan.core_margin          [2, 2]
     floorplan.aspect_ratio         1.0
   cts
-    cts.max_fanout                 20
+    cts.max_fanout                 32
   place
     place.target_density           0.2
     place.target_overflow          0.1
@@ -749,7 +793,7 @@ tech = "prtech/techLEF/N551P6M_ecos.lef"
 | `floorplan.core_util` | float | 0.4 | [0.01, 1.0] | floorplan |
 | `floorplan.core_margin` | list[int] | [2, 2] | — | floorplan |
 | `floorplan.aspect_ratio` | float | 1.0 | [0.1, 10.0] | floorplan |
-| `cts.max_fanout` | int | 20 | [1, 200] | cts |
+| `cts.max_fanout` | int | 32 | [1, 200] | cts |
 | `place.target_density` | float | 0.2 | [0.1, 0.95] | placement |
 | `place.target_overflow` | float | 0.1 | [0.0, 1.0] | placement |
 | `place.global_right_padding` | int | 0 | [0, 100] | placement |
@@ -760,6 +804,70 @@ tech = "prtech/techLEF/N551P6M_ecos.lef"
 | `sta.max_paths` | int | 1000 | [1, 100000] | sta |
 
 优先级：CLI `--set` > `ecc.toml` `[params.*]` > 模板默认值。`pdk.*` 路径参数写入 `[pdk.overrides]`：`pdk.tech`、`pdk.lefs`、`pdk.libs`、`pdk.mapping_file` 相对 `pdk.root` 解析，`pdk.sdc` 和 `pdk.spef` 相对项目目录解析；六者都会校验文件。
+
+## 9.5. macro — 手动宏单元摆放
+
+```bash
+ecc macro set INSTANCE --x X --y Y --orient ORIENT [--project DIR] [--workspace NAME] [--plain]
+ecc macro remove INSTANCE [--project DIR] [--workspace NAME] [--plain]
+ecc macro import PATH [ --project DIR] [--workspace NAME] [--plain]
+ecc macro show [--project DIR] [--workspace NAME] [--plain]
+```
+
+含硬宏（SRAM 等）的设计默认在 `macroPlacement` 步骤由 DreamPlace 自动摆放，结果写入 `config/macro_location.tcl`。`ecc macro` 管理手工摆放参数 `macro.placements`：坐标单位微米，实例以 `fixed` 状态提交。参数非空时 `macroPlacement` 保留 load/save 流程但跳过 DreamPlace，由 `postFloorplan` 按该文件提交宏。方向取值 `R0`、`R90`、`R180`、`R270`、`MX`、`MY`、`MX90`、`MY90`；同一实例重复 `set` 为原地更新。`import` 解析 `placeInstance` 交接文件（微米、R 记法，跳过注释与 `setInstancePlacementStatus` 行）并**整表替换** `macro.placements`；空文件等于清空参数，畸形语句整体报错不写入。
+
+与 `ecc param` 相同的两种 scope：
+
+- 项目（默认）：写入 `ecc.toml` `[params.macro]`，在下一次新建 workspace（`ecc run` / `--overwrite`）或 `ecc workspace refresh` 时渲染进 Tcl；
+- `--workspace NAME`：写入该 workspace 的 `home/params.toml`，立即重生成 `config/macro_location.tcl`，并把 `macroPlacement` 及其后缀标记为待执行，之后 `ecc run --workspace NAME` 从 `macroPlacement` 续跑。
+
+`ecc macro show --workspace NAME` 额外解析现有 `config/macro_location.tcl` 并输出 `file_placements` 与 `diverged`（文件与参数是否一致），便于发现手改文件或导入未落盘的差异。
+
+```console
+$ ecc macro set u_ram0 --x 10 --y 20.5 --orient R0
+[status]
+  param: macro.placements
+  instance: u_ram0
+  x: 10.0
+  y: 20.5
+  orientation: R0
+  placements: [{'instance': 'u_ram0', 'x': 10.0, 'y': 20.5, 'orientation': 'R0'}]
+  status: set
+  source: ecc.toml
+
+$ ecc macro set u_ram1 --x 150 --y 20.5 --orient MY
+$ ecc macro show
+[result]
+  param: macro.placements
+  placements: [{'instance': 'u_ram0', 'x': 10.0, 'y': 20.5, 'orientation': 'R0'}, {'instance': 'u_ram1', 'x': 150.0, 'y': 20.5, 'orientation': 'MY'}]
+  source: ecc.toml
+
+$ ecc macro remove u_ram1
+[status]
+  param: macro.placements
+  instance: u_ram1
+  placements: [{'instance': 'u_ram0', 'x': 10.0, 'y': 20.5, 'orientation': 'R0'}]
+  status: removed
+  source: ecc.toml
+```
+
+在已有 workspace 上调整宏位置并重跑受影响片段：
+
+```bash
+ecc macro set u_ram0 --x 120.0 --y 80.0 --orient MY --workspace default
+ecc run --workspace default                 # 从 macroPlacement 续跑，下游步骤一并重跑
+ecc macro remove u_ram0 --workspace default # 删除最后一个条目后恢复 DreamPlace 自动摆放，再续跑即回到自动结果
+```
+
+把一份现成的 `macro_location.tcl`（例如另一工程或 Chip Viewer 手摆导出的文件）导入为手工摆放：
+
+```bash
+ecc macro import /path/to/macro_location.tcl --workspace default
+ecc macro show --workspace default          # file_placements 与 placements 一致、diverged 为 False
+ecc run --workspace default                 # 跳过 DreamPlace，postFloorplan 按文件提交宏
+```
+
+实例名必须存在于设计中，且必须列出全部硬宏——`postFloorplan` 会按缺失实例名报错；`macro_location.tcl` 是生成物，不支持手工编辑（未设置该参数时重跑 `macroPlacement` 会重新生成）。交接文件格式与三阶段 floorplan 细节见 [floorplan-flow.cn.md](floorplan-flow.cn.md)，参数说明见[配置参考 §1.5](ecc-config-ref.cn.md)。
 
 ## 10. pdk — PDK 路径配置
 
@@ -890,7 +998,7 @@ PDK / Node         : ics55
 
 ### 12.2 qor — QoR 总体计分报告
 
-按 GUI 项目看板的计分规则给当前 workspace 打分：每条 v3 `qor_metrics.json` 指标按固定失败阈值折算 0-100 分（slack 类线性、core_utilization 目标区间 [0.45,0.70]、lower/higher_is_better 比例），维度内取平均，再按权重（Timing 0.35 / Power 0.25 / Routability 0.2 / Area 0.1 / Clock-DFM 0.1）加权出总分——**缺项维度不重归一化**（与 GUI 一致，缺项会拉低总分）；60 分为通过线。默认写 `<workspace>/signoff/<design>_qor_report.txt`：
+用 ECC 共用的 `qor_scoring` 规则给当前 workspace 打分（Studio Snapshot 也用这一套）：每条 v3 `qor_metrics.json` 指标按固定失败阈值折算 0-100 分（slack 类线性、core_utilization 目标区间 [0.45,0.70]、lower/higher_is_better 比例），维度内取平均，再按权重（Timing 0.35 / Power 0.25 / Routability 0.2 / Area 0.1 / Clock-DFM 0.1）加权出总分——**缺项维度不重归一化**（缺项会拉低总分）；60 分为通过线。默认写 `<workspace>/signoff/<design>_qor_report.txt`：
 
 ```console
 $ ecc report qor --project gcd --plain
@@ -922,18 +1030,20 @@ ecc report checklist --project gcd
   - `checklist`：`<step>/checklist.json`（v3 契约，缺失时回退 `home/checklist.json` 按步骤过滤）
 - `--section` 可重复指定，只输出选中的节；某节产物缺失时该节显示 `unavailable`
 
-step token 与 `ecc log` 同源（`synthesis/floorplan/placement/cts/...`），同时接受 flow 内部名（如 `Timing optimization`）与目录名变体（`timing_optimization`）；未知 token 返回 `unknown_step` 并列出可用值。
+step token 与 `ecc log` 同源（`synthesis/pre_floorplan/macro_placement/post_floorplan/placement/cts/...`），同时接受 flow 内部名（如 `Timing optimization`）与目录名变体（`timing_optimization`）；未知 token 返回 `unknown_step` 并列出可用值。
 
 ```console
 $ ecc report step --workspace default
 [report step]
   workspace : /tmp/gcd/default
-  steps     : 15
+  steps     : 17
 
   step                   tool         status    runtime  peak MB  metrics quality  checklist
   synthesis              yosys        success   0:0:17   1165.89  10      pass     ready
   lec                    yosys_lec    success   0:0:1    0.164    -       -        ready
-  floorplan              ecc          success   0:0:1    97.516   11      pass     ready
+  pre_floorplan          ecc          success   0:0:1    97.516   -       -        ready
+  macro_placement        dreamplace   success   0:0:5    97.516   -       -        ready
+  post_floorplan         ecc          success   0:0:1    97.516   11      pass     ready
   ...
   drc                    ecc          success   0:0:3    42.0     12      blocked  blocked (1 blocked)
 
@@ -1030,7 +1140,15 @@ ecc report qor --workspace baseline    # 两个 run 的 QoR 报告分别对比
 ecc report qor --workspace exp1
 
 # 已有现成综合网表时，也可以从中间步骤起建范围 workspace（入口输入要求见 §5.1）：
-ecc run --workspace pnr --from floorplan --to route
+ecc run --workspace pnr --from prefloorplan --to route
+```
+
+含硬宏的设计可改用手工摆放（完整说明见 §9.5）：
+
+```bash
+ecc macro set u_ram0 --x 10 --y 20.5 --orient R0 --workspace default
+ecc run --workspace default   # 从 macroPlacement 续跑：跳过 DreamPlace，按手工位置提交宏
+ecc macro show --workspace default
 ```
 
 `project.json` 生成后，项目级查看、签核和报告命令按已声明的 workspace 选择；只有一个活跃 workspace 时自动选中，多个活跃 workspace 时必须显式传 `--workspace NAME`（否则报 `workspace_required` 并列出可用名称）。不再使用的 workspace 可在 `project.json` 中把其 `status` 改为 `archived`，使其退出自动选择。

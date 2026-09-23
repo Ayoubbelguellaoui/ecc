@@ -43,13 +43,14 @@ def resolve_manifest_run_target(command_input, ctx):
     manifest_invalid, workspace_required, or invalid_workspace.
     """
     from chipcompiler.cli.core.records import error_record
-    from chipcompiler.cli.project.manifest import load_manifest
+    from chipcompiler.project.manifest import load_manifest
 
     project_dir = ctx.project_dir
-    workspace_name = command_input.workspace
+    workspace_name = ctx.run_id
+    explicit_path = ctx.run_dir if ctx.workspace_path_explicit else None
 
     if ctx.project_state == "virgin":
-        run_name = workspace_name or ctx.run_id or "default"
+        run_name = workspace_name or "default"
         if invalid_workspace_name(run_name):
             return CommandResult.err(
                 [
@@ -60,7 +61,7 @@ def resolve_manifest_run_target(command_input, ctx):
                     )
                 ]
             )
-        return (os.path.join(project_dir, run_name), run_name, False, [])
+        return (explicit_path or os.path.join(project_dir, run_name), run_name, False, [])
 
     if ctx.manifest_error and ctx.manifest_error.startswith("manifest_invalid"):
         return CommandResult.err([error_record("manifest_invalid", reason=ctx.manifest_error)])
@@ -77,6 +78,19 @@ def resolve_manifest_run_target(command_input, ctx):
         return (os.path.join(project_dir, "default"), "default", False, [])
 
     if match is not None:
+        if explicit_path is not None and os.path.realpath(match.workspace_path) != os.path.realpath(
+            explicit_path
+        ):
+            return CommandResult.err(
+                [
+                    error_record(
+                        "workspace_id_conflict",
+                        workspace_id=workspace_name,
+                        workspace=explicit_path,
+                        reason=f"workspace is already declared at {match.workspace_path}",
+                    )
+                ]
+            )
         return (match.workspace_path, match.workspace_id, True, [])
 
     if invalid_workspace_name(workspace_name):
@@ -93,7 +107,8 @@ def resolve_manifest_run_target(command_input, ctx):
     # path would operate that workspace under an alias the document never
     # spelled — bypassing its registration and status write-back. Refuse
     # and name the declared selector instead.
-    candidate_real = os.path.realpath(os.path.join(project_dir, workspace_name))
+    candidate_path = explicit_path or os.path.join(project_dir, workspace_name)
+    candidate_real = os.path.realpath(candidate_path)
     for workspace in manifest.workspaces:
         if os.path.realpath(workspace.workspace_path) == candidate_real:
             return CommandResult.err(
@@ -106,7 +121,7 @@ def resolve_manifest_run_target(command_input, ctx):
                     )
                 ]
             )
-    return (os.path.join(project_dir, workspace_name), workspace_name, False, [])
+    return (candidate_path, workspace_name, False, [])
 
 
 def _workspace_failed_result(run_name: str, run_dir: str, reason: str | None) -> CommandResult:
@@ -139,16 +154,27 @@ def _fresh_entry_step_name(cfg, flow_config) -> str | None:
     return None
 
 
-def _write_back_status(project_dir: str, run_name: str, status: str, warning_records: list) -> None:
-    """Best-effort manifest status write-back; degrades to a warning."""
-    from chipcompiler.cli.core.records import warning_record
-    from chipcompiler.cli.project.manifest_write import write_back_workspace_status
+def _write_back_status(
+    project_dir: str, run_name: str, status: str, warning_records: list, *, repair: str
+) -> None:
+    """Manifest status write-back; failure is a diagnosable error, never silent.
+
+    The run itself is NOT failed: the flow already executed and its result
+    stands. The error record names the status that did not persist and the
+    repair command that rewrites it on a later invocation.
+    """
+    from chipcompiler.cli.core.records import error_record
+    from chipcompiler.project.manifest_write import write_back_workspace_status
 
     if not write_back_workspace_status(project_dir, run_name, status):
         warning_records.append(
-            warning_record(
+            error_record(
                 "manifest_write_back_failed",
-                reason="run status could not be written back to project.json",
+                workspace_id=run_name,
+                lost_status=status,
+                reason="run status could not be written back to project.json; "
+                "the manifest is out of date until repaired",
+                repair=repair,
             )
         )
 
@@ -237,6 +263,7 @@ def execute_fresh_run(
         resolve_rtl,
         to_parameters,
     )
+    from chipcompiler.cli.project.effective_config import flow_config_selects_steps
     from chipcompiler.data import create_workspace
     from chipcompiler.data.parameter import save_parameter, update_parameters
     from chipcompiler.data.workspace.config_overrides import CONFIG_OVERRIDES_KEY
@@ -244,6 +271,9 @@ def execute_fresh_run(
 
     project = ctx.project
     project_dir = ctx.project_dir
+    # A failed manifest write-back is repaired by re-running the workspace:
+    # the existing-run path rewrites the terminal status on every invocation.
+    write_back_repair = disclosure_cmd("ecc run", project, run_name)
 
     # Commit point: once the replacement is verified and the backup is
     # discarded, execution failures are a normal failed run — the new tree
@@ -312,11 +342,13 @@ def execute_fresh_run(
         if terminal_failure() and workspace_registered:
             # The target is genuinely gone: mark the entry failed. A restored
             # backup keeps its prior status — the refresh never happened.
-            _write_back_status(project_dir, run_name, "failed", warning_records)
+            _write_back_status(
+                project_dir, run_name, "failed", warning_records, repair=write_back_repair
+            )
         elif registration_created and backup_path is not None:
             # This invocation pre-registered an undeclared workspace and then
             # restored the previous tree: the fresh entry must not shadow it.
-            from chipcompiler.cli.project.manifest_write import remove_workspace_registration
+            from chipcompiler.project.manifest_write import remove_workspace_registration
 
             remove_workspace_registration(project_dir, run_name)
 
@@ -353,6 +385,9 @@ def execute_fresh_run(
         input_filelist = generated_filelist
         origin_verilog = ""
     parameters = to_parameters(cfg)
+    if uses_netlist_input:
+        # Preserve the creator's input role for Studio/CLI reopen symmetry.
+        parameters["_input_mode"] = "postSynthesis"
     pdk_root = resolve_pdk_root(cfg)
 
     if base is not None:
@@ -437,11 +472,20 @@ def execute_fresh_run(
                 with open(provenance_path, "w") as _f:
                     json.dump(cli_overrides, _f)
 
-            if flow_config is None:
-                # CLI-born workspaces persist the named prefix chain as their target.
+            if not flow_config_selects_steps(flow_config):
+                # CLI-born workspaces persist the named preset chain as
+                # their target; a declared skip policy rides along,
+                # normalized (validate_flow_config is the normalizer).
                 workspace_parameters = getattr(workspace, "parameters", None)
                 if workspace_parameters is not None:
-                    workspace_parameters.data["_flow"] = {"preset": cfg.flow_preset}
+                    flow_section: dict = {"preset": cfg.flow_preset}
+                    if isinstance(flow_config, dict) and "skip_steps" in flow_config:
+                        from chipcompiler.data.workspace_config import validate_flow_config
+
+                        flow_section = validate_flow_config(
+                            {"preset": cfg.flow_preset, "skip_steps": flow_config["skip_steps"]}
+                        )
+                    workspace_parameters.data["_flow"] = flow_section
                     if not save_parameter(workspace_parameters):
                         return failed_workspace("failed to persist the flow target in params.toml")
         except Exception as exc:
@@ -454,7 +498,13 @@ def execute_fresh_run(
             engine_flow = EngineFlow(workspace=workspace)
             flow_builders = rtl2gds_api.get_flow_builders()
             if not engine_flow.has_init():
-                for step, tool, state in flow_builders[cfg.flow_preset]():
+                # No-arg preset builders stay canonical; the skip policy is
+                # applied to their output so every ledger-creation path
+                # filters through one resolver.
+                for step, tool, state in rtl2gds_api.filter_flow_steps(
+                    flow_builders[cfg.flow_preset](),
+                    rtl2gds_api.resolve_skip_steps(flow_config),
+                ):
                     engine_flow.add_step(step=step, tool=tool, state=state)
 
             engine_flow.create_step_workspaces()
@@ -473,14 +523,26 @@ def execute_fresh_run(
             # The replacement is fully constructed and verified: commit it.
             # The previous workspace's backup is obsolete, the new tree owns
             # the target, and later failures are a normal failed run.
+            from chipcompiler.engine.snapshot import create_engineering_snapshot
+
+            if getattr(workspace, "directory", None):
+                create_engineering_snapshot(workspace)
             commit_replacement()
 
             if workspace_registered and execute_flow:
-                _write_back_status(project_dir, run_name, "running", warning_records)
+                _write_back_status(
+                    project_dir, run_name, "running", warning_records, repair=write_back_repair
+                )
 
             if not execute_flow:
                 if workspace_registered:
-                    _write_back_status(project_dir, run_name, "not_started", warning_records)
+                    _write_back_status(
+                        project_dir,
+                        run_name,
+                        "not_started",
+                        warning_records,
+                        repair=write_back_repair,
+                    )
                 return CommandResult.ok(
                     warning_records
                     + [
@@ -501,11 +563,15 @@ def execute_fresh_run(
             if should_enable_run_progress(ctx, sys.stderr):
                 flow_ok = run_flow_with_progress(engine_flow, ctx, project, sys.stderr)
             else:
-                flow_ok = engine_flow.run_steps()
+                from chipcompiler.engine import ExecutionPlan, execute
+
+                flow_ok = execute(engine_flow, ExecutionPlan(intent="run")).succeeded
 
             if not flow_ok:
                 if workspace_registered:
-                    _write_back_status(project_dir, run_name, "failed", warning_records)
+                    _write_back_status(
+                        project_dir, run_name, "failed", warning_records, repair=write_back_repair
+                    )
                 failure_records = [
                     {
                         "workspace_id": run_name,
@@ -542,7 +608,9 @@ def execute_fresh_run(
             ws_locks.close()
 
     if workspace_registered:
-        _write_back_status(project_dir, run_name, "success", warning_records)
+        _write_back_status(
+            project_dir, run_name, "success", warning_records, repair=write_back_repair
+        )
 
     success_records = [
         {

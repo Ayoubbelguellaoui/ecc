@@ -28,6 +28,8 @@ def test_help_renders_for_every_command(path, capsys):
 
 def test_help_keeps_styles_when_color_is_forced(monkeypatch, capsys):
     monkeypatch.setattr("typer.rich_utils.FORCE_TERMINAL", True)
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.setenv("TERM", "xterm-256color")
 
     rc = cli_main.run(["--help"])
 
@@ -112,6 +114,7 @@ def test_run_help_documents_fresh_run_override_rule(capsys):
 
     out = capsys.readouterr().out
     assert rc == 0
+    assert "--path" not in out
     assert "set_requires_fresh_run" in out
     assert "cli-param-overrides.json" in out
 

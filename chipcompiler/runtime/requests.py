@@ -4,7 +4,82 @@ from typing import Any
 
 @dataclass(frozen=True)
 class WorkspaceCreateRequest:
+    directory: str = ""
+    pdk: str = ""
+    pdk_root: str = ""
+    pdk_json: Any = None
+    parameters: dict[str, Any] | None = None
+    origin_def: str = ""
+    origin_verilog: str = ""
+    filelist: str = ""
+    rtl_list: list[str] | None = None
+    sdc: str = ""
+    flow_config: dict[str, Any] | None = None
+    command_id: str = ""
+    target_directory: str = ""
+    workspace_spec: dict[str, Any] | None = None
+    workspace_bindings: dict[str, Any] | None = None
+    project_id: str = ""
+    project_root: str = ""
+
+
+@dataclass(frozen=True)
+class WorkspaceOpenRequest:
     directory: str
+    workspace_bindings: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class WorkspaceDeriveRequest:
+    directory: str
+    target_directory: str
+    reset_from_step: str = ""
+    command_id: str = ""
+    cause: str = "workspace.derived"
+
+
+@dataclass(frozen=True)
+class EmptyRequest:
+    pass
+
+
+@dataclass(frozen=True)
+class WorkspaceSpecOpenRequest:
+    directory: str
+    workspace_bindings: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class WorkspaceSpecValidateRequest:
+    workspace_spec: dict[str, Any]
+    workspace_bindings: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class ProjectManifestLoadRequest:
+    project_root: str
+
+
+@dataclass(frozen=True)
+class ProjectManifestDiscoverRequest:
+    directory: str
+
+
+@dataclass(frozen=True)
+class ProjectManifestMutationRequest:
+    project_root: str
+    mutation: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class WorkspaceSpecCreateRequest:
+    command_id: str = ""
+    target_directory: str = ""
+    workspace_spec: dict[str, Any] | None = None
+    workspace_bindings: dict[str, Any] | None = None
+    project_id: str = ""
+    project_root: str = ""
+    directory: str = ""
     pdk: str = ""
     pdk_root: str = ""
     pdk_json: Any = None
@@ -18,13 +93,49 @@ class WorkspaceCreateRequest:
 
 
 @dataclass(frozen=True)
-class WorkspaceOpenRequest:
+class WorkspaceUpdateRequest:
+    command_id: str
+    workspace_id: str
+    expected_workspace_revision: int
+    workspace_spec: dict[str, Any]
+    workspace_bindings: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class WorkspaceConfigurationUpdateRequest:
+    command_id: str
+    workspace_id: str
+    expected_workspace_revision: int
+    configuration: dict[str, Any]
+    workspace_bindings: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class WorkspaceStepConfigurationUpdateRequest:
+    command_id: str
+    workspace_id: str
+    expected_workspace_revision: int
+    step_id: str
+    parameters: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class WorkspaceStepConfigurationReadRequest:
+    step: str
+    workspace_id: str = ""
+    directory: str = ""
+
+
+@dataclass(frozen=True)
+class WorkspaceStepOutputsRequest:
     directory: str
+    step: str = ""
 
 
 @dataclass(frozen=True)
 class WorkspaceIdRequest:
     workspace_id: str
+    expected_workspace_revision: int = 1
 
 
 @dataclass(frozen=True)
@@ -66,19 +177,26 @@ class WorkspaceInfoRequest:
 @dataclass(frozen=True)
 class FlowRunRequest:
     workspace_id: str
+    expected_workspace_revision: int | None = None
     rerun: bool = False
+    # Explicit opt-out of the rerun user-input preservation: the default
+    # rerun keeps the workspace's current parameters (GUI parity); set this
+    # to also restore the template runtime parameters (die/core).
+    reset_runtime_params: bool = False
 
 
 @dataclass(frozen=True)
 class FlowRunStepRequest:
     workspace_id: str
     step: str
+    expected_workspace_revision: int | None = None
     rerun: bool = False
 
 
 @dataclass(frozen=True)
 class OperationStartFlowRequest:
     workspace_id: str
+    expected_workspace_revision: int | None = None
     rerun: bool = False
     origin: str = "gui"
     idempotency_key: str = ""
@@ -88,6 +206,7 @@ class OperationStartFlowRequest:
 class OperationStartStepRequest:
     workspace_id: str
     step: str
+    expected_workspace_revision: int | None = None
     rerun: bool = False
     reset_dependents: bool = False
     origin: str = "gui"
@@ -137,6 +256,14 @@ class LayoutEditApplyRequest:
 class LayoutEditSaveRequest:
     edit_session_id: str
     expected_revision: int
+    expected_workspace_revision: int = 1
+    write_macro_location: bool = False
+
+
+@dataclass(frozen=True)
+class WorkspaceMutationRequest:
+    workspace_id: str
+    expected_workspace_revision: int = 1
 
 
 @dataclass(frozen=True)
@@ -178,6 +305,7 @@ FIELD_ALIASES = {
     "paramJson": "parameters",
     "rtlList": "rtl_list",
     "workspaceId": "workspace_id",
+    "expectedWorkspaceRevision": "expected_workspace_revision",
     "operationId": "operation_id",
     "eventId": "event_id",
     "stepCommitId": "step_commit_id",
@@ -194,6 +322,15 @@ FIELD_ALIASES = {
     "expectedSourceFingerprint": "expected_source_fingerprint",
     "id": "info_id",
     "additionalFiles": "additional_files",
+    "workspaceSpec": "workspace_spec",
+    "workspaceBindings": "workspace_bindings",
+    "targetDirectory": "target_directory",
+    "projectId": "project_id",
+    "projectRoot": "project_root",
+    "stepId": "step_id",
+    "resetFromStep": "reset_from_step",
+    "writeMacroLocation": "write_macro_location",
+    "resetRuntimeParams": "reset_runtime_params",
 }
 
 
@@ -221,7 +358,12 @@ def parse_request_model(model: type, params: object):
         if required and _is_missing(values[field.name]):
             raise RequestValidationError(f"missing required field: {field.name}")
 
-        if field.name in {"rerun", "reset_dependents"} and not isinstance(values[field.name], bool):
+        if field.name in {
+            "rerun",
+            "reset_dependents",
+            "write_macro_location",
+            "reset_runtime_params",
+        } and not isinstance(values[field.name], bool):
             raise RequestValidationError(f"{field.name} must be a boolean")
         if field.name == "additional_files":
             _validate_additional_files(values[field.name])

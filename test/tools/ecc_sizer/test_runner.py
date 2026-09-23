@@ -1,9 +1,10 @@
+import logging
 import os
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
-from chipcompiler.data import StateEnum, StepEnum
+from chipcompiler.data import SkippableStepEnum, StateEnum
 
 from ._sizer_helpers import (
     ExplodingEccModule,
@@ -22,7 +23,7 @@ def test_sizer_runner_invokes_generated_command_and_checks_outputs(tmp_path, mon
     workspace = _workspace(tmp_path)
     step = sizer_builder.build_step(
         workspace=workspace,
-        step_name=StepEnum.TIMING_OPT.value,
+        step_name=SkippableStepEnum.TIMING_OPT.value,
         input_def=Path("input.def"),
         input_verilog=Path("input.v"),
     )
@@ -68,7 +69,7 @@ def test_sizer_runner_invokes_generated_command_and_checks_outputs(tmp_path, mon
                 "-f",
                 str(step.script.sizer_cmd),
             ],
-            str(step.data.steps[StepEnum.TIMING_OPT.value]),
+            str(step.data.steps[SkippableStepEnum.TIMING_OPT.value]),
             None,
             subprocess.STDOUT,
             False,
@@ -83,7 +84,7 @@ def test_sizer_runner_marks_subflow_invalid_when_tool_or_config_missing(tmp_path
     workspace = _workspace(tmp_path)
     step = sizer_builder.build_step(
         workspace=workspace,
-        step_name=StepEnum.TIMING_OPT.value,
+        step_name=SkippableStepEnum.TIMING_OPT.value,
         input_def=Path("input.def"),
         input_verilog=Path("input.v"),
     )
@@ -112,7 +113,7 @@ def test_sizer_runner_does_not_run_sizer_when_dreamplace_is_missing(tmp_path, mo
     workspace = _workspace(tmp_path)
     step = sizer_builder.build_step(
         workspace=workspace,
-        step_name=StepEnum.TIMING_OPT.value,
+        step_name=SkippableStepEnum.TIMING_OPT.value,
         input_def=Path("input.def"),
         input_verilog=Path("input.v"),
     )
@@ -145,7 +146,7 @@ def test_sizer_runner_marks_subflow_incomplete_when_outputs_are_missing(
     workspace = _workspace(tmp_path)
     step = sizer_builder.build_step(
         workspace=workspace,
-        step_name=StepEnum.TIMING_OPT.value,
+        step_name=SkippableStepEnum.TIMING_OPT.value,
         input_def=Path("input.def"),
         input_verilog=Path("input.v"),
     )
@@ -166,6 +167,88 @@ def test_sizer_runner_marks_subflow_incomplete_when_outputs_are_missing(
     assert _subflow_states(step)["run sizer"] == StateEnum.Imcomplete.value
 
 
+def test_sizer_runner_marks_subflow_incomplete_when_tool_is_signal_terminated(
+    tmp_path,
+    monkeypatch,
+    caplog,
+):
+    from chipcompiler.tools.ecc_sizer import builder as sizer_builder
+    from chipcompiler.tools.ecc_sizer import runner as sizer_runner
+
+    workspace = _workspace(tmp_path)
+    step = sizer_builder.build_step(
+        workspace=workspace,
+        step_name=SkippableStepEnum.TIMING_OPT.value,
+        input_def=Path("input.def"),
+        input_verilog=Path("input.v"),
+    )
+    sizer_builder.build_step_space(step)
+    sizer_builder.build_step_config(workspace, step)
+    Path(step.log.file).write_text(
+        "Read 527000 / 527400 Instances\n"
+        "*** buffer overflow detected ***: terminated\n"
+        "trailing line\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(sizer_runner, "get_sizer_command", lambda: ["/fake/sizer"])
+    monkeypatch.setattr(sizer_runner, "is_eda_exist", lambda: True)
+    monkeypatch.setattr(sizer_runner, "is_sizer_runtime_exist", lambda: True)
+    monkeypatch.setattr(sizer_runner, "is_dreamplace_exist", lambda: True)
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda command, cwd, stdout, stderr, check: SimpleNamespace(returncode=-6),
+    )
+
+    with caplog.at_level(logging.ERROR, logger=sizer_runner.__name__):
+        assert sizer_runner.run_step(workspace, step) == StateEnum.Imcomplete
+
+    assert _subflow_states(step)["run sizer"] == StateEnum.Imcomplete.value
+    assert not sizer_builder.sizer_staging_def(step).exists()
+    assert not sizer_builder.sizer_staging_verilog(step).exists()
+    failure = caplog.records[-1].getMessage()
+    assert "signal=SIGABRT(6)" in failure
+    assert "*** buffer overflow detected ***: terminated" in failure
+
+
+def test_sizer_runner_reports_plain_exit_code_without_signal_or_fatal_line(
+    tmp_path,
+    monkeypatch,
+    caplog,
+):
+    from chipcompiler.tools.ecc_sizer import builder as sizer_builder
+    from chipcompiler.tools.ecc_sizer import runner as sizer_runner
+
+    workspace = _workspace(tmp_path)
+    step = sizer_builder.build_step(
+        workspace=workspace,
+        step_name=SkippableStepEnum.TIMING_OPT.value,
+        input_def=Path("input.def"),
+        input_verilog=Path("input.v"),
+    )
+    sizer_builder.build_step_space(step)
+    sizer_builder.build_step_config(workspace, step)
+
+    monkeypatch.setattr(sizer_runner, "get_sizer_command", lambda: ["/fake/sizer"])
+    monkeypatch.setattr(sizer_runner, "is_eda_exist", lambda: True)
+    monkeypatch.setattr(sizer_runner, "is_sizer_runtime_exist", lambda: True)
+    monkeypatch.setattr(sizer_runner, "is_dreamplace_exist", lambda: True)
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda command, cwd, stdout, stderr, check: SimpleNamespace(returncode=1),
+    )
+
+    with caplog.at_level(logging.ERROR, logger=sizer_runner.__name__):
+        assert sizer_runner.run_step(workspace, step) == StateEnum.Imcomplete
+
+    failure = caplog.records[-1].getMessage()
+    assert "exit_code=1" in failure
+    assert "signal=" not in failure
+    assert "fatal_log_line=''" in failure
+
+
 def test_sizer_runner_inherits_captured_stdio_instead_of_truncating_step_log(
     tmp_path,
     monkeypatch,
@@ -176,7 +259,7 @@ def test_sizer_runner_inherits_captured_stdio_instead_of_truncating_step_log(
     workspace = _workspace(tmp_path)
     step = sizer_builder.build_step(
         workspace=workspace,
-        step_name=StepEnum.TIMING_OPT.value,
+        step_name=SkippableStepEnum.TIMING_OPT.value,
         input_def=Path("input.def"),
         input_verilog=Path("input.v"),
     )
@@ -215,7 +298,7 @@ def test_public_sizer_run_marks_invalid_when_tool_missing(tmp_path, monkeypatch)
     workspace = _workspace(tmp_path)
     step = sizer_builder.build_step(
         workspace=workspace,
-        step_name=StepEnum.TIMING_OPT.value,
+        step_name=SkippableStepEnum.TIMING_OPT.value,
         input_def=Path("input.def"),
         input_verilog=Path("input.v"),
     )
@@ -240,7 +323,7 @@ def test_public_sizer_run_marks_invalid_when_runtime_missing(tmp_path, monkeypat
     workspace = _workspace(tmp_path)
     step = sizer_builder.build_step(
         workspace=workspace,
-        step_name=StepEnum.TIMING_OPT.value,
+        step_name=SkippableStepEnum.TIMING_OPT.value,
         input_def=Path("input.def"),
         input_verilog=Path("input.v"),
     )

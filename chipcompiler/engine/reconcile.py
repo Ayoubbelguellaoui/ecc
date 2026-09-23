@@ -27,19 +27,12 @@ Outcomes:
 - ``mismatch``: divergent flows — validation is pure-read, nothing was
   written; the caller surfaces flow_mismatch.
 
-Ledgers persisted in the pre-reorder chain order (DRC/LVS before filler,
-RCX/STA/Harden as preset suffixes) are migrated onto the canonical chain by
-step name instead of rejected: records up to ``route`` keep their states,
-everything after restarts from Unstart, and the outcome falls back to
-``repaired``/``resume``.
-
 :func:`classify_workspace` exposes the pure-read phase to callers that
 must reject a mismatch before loading (and thereby initializing or
 migrating) the workspace; it additionally returns ``pending_mutation``
 when the flow is compatible but an append/adopt is due.
 """
 
-import fcntl
 import logging
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -77,6 +70,20 @@ def _entry_names(entries: list[tuple[str, str]]) -> tuple[str, ...]:
     return tuple(name for name, _tool in entries)
 
 
+def _target_step_states(flow_data: dict, target: list[tuple[str, str]]) -> set[str]:
+    """States of the ledger steps the target names, matched by step name.
+
+    Name matching (not position slicing) keeps skipped ledger entries from
+    shifting which states fall inside the evaluated target range.
+    """
+    states_by_name = {
+        str(step.get("name", "")): str(step.get("state", ""))
+        for step in flow_data.get("steps", [])
+        if isinstance(step, dict)
+    }
+    return {states_by_name.get(name, "") for name, _tool in target}
+
+
 def compare_flows(persisted: list[tuple[str, str]], target: list[tuple[str, str]]) -> str:
     """Pairwise (name, tool) comparison of persisted vs target step lists."""
     if persisted == target:
@@ -88,61 +95,51 @@ def compare_flows(persisted: list[tuple[str, str]], target: list[tuple[str, str]
     return "divergent"
 
 
-def _is_legacy_missing_synthesis_lec(
-    persisted: list[tuple[str, str]], target: list[tuple[str, str]]
-) -> bool:
-    """Recognize pre-synthesis-LEC ledgers as upgradeable flow prefixes."""
-    if not any(name == "lec" and tool == "yosys_lec" for name, tool in target):
-        return False
-    target_without_lec = [entry for entry in target if entry != ("lec", "yosys_lec")]
-    return persisted == target_without_lec or (
-        len(persisted) < len(target_without_lec)
-        and target_without_lec[: len(persisted)] == persisted
-    )
+def _relation_with_skipped_steps(
+    persisted: list[tuple[str, str]], target: list[tuple[str, str]], skip: tuple[str, ...]
+) -> str:
+    """Compatibility relation treating policy-skipped ledger steps as inert.
 
-
-# The pre-reorder canonical chain: DRC/LVS ran before filler, and RCX/STA/
-# Harden were preset-only suffixes. Ledgers persisted in this shape map onto
-# the current chain by step name.
-_LEGACY_RTL2GDS_CHAIN = (
-    ("Synthesis", "yosys"),
-    ("lec", "yosys_lec"),
-    ("Floorplan", "ecc"),
-    ("place", "dreamplace"),
-    ("CTS", "ecc"),
-    ("legalization", "dreamplace"),
-    ("Timing optimization", "sizer"),
-    ("route", "ecc"),
-    ("drc", "ecc"),
-    ("lvs", "ecc"),
-    ("filler", "ecc"),
-    ("postRouteLec", "yosys_lec"),
-    ("RCX", "ecc"),
-    ("sta", "ecc"),
-    ("Harden", "ecc"),
-)
-
-
-def _is_legacy_reordered_chain(persisted: list[tuple[str, str]]) -> bool:
-    """Whether a ledger is an order-preserving slice of the pre-reorder chain.
-
-    Legacy presets always began at Synthesis, so a ledger starting anywhere
-    else is a foreign shape, not a legacy one.
+    A ledger written under a wider policy (e.g. with the synthesis LEC
+    enabled) stays runnable when the effective policy excludes those
+    steps: the excluded entries are ignored for comparison and never
+    removed from the ledger. An entry only counts as a skipped step when
+    its (name, tool) pair matches the canonical chain — a corrupted entry
+    (right name, wrong tool) is never silently ignored. Returns "" when
+    the ledger is not compatible even after ignoring skipped steps.
     """
-    if not persisted or persisted[0] != _LEGACY_RTL2GDS_CHAIN[0]:
-        return False
-    positions = {entry: index for index, entry in enumerate(_LEGACY_RTL2GDS_CHAIN)}
-    taken = []
-    for entry in persisted:
-        position = positions.get(entry)
-        if position is None:
-            return False
-        taken.append(position)
-    return taken == sorted(set(taken)) and len(taken) == len(set(taken))
+    from chipcompiler.data.workspace import _canonical_rtl2gds_flow_entries
+
+    canonical_tools = {name: tool for name, tool, _state in _canonical_rtl2gds_flow_entries()}
+    excluded = set(skip)
+    kept = [
+        entry
+        for entry in persisted
+        if not (entry[0] in excluded and entry[1] == canonical_tools.get(entry[0]))
+    ]
+    if kept == target:
+        return "equal"
+    if len(kept) < len(target) and target[: len(kept)] == kept:
+        return "proper_prefix"
+    if len(target) < len(kept) and kept[: len(target)] == target:
+        return "target_prefix"
+    return ""
+
+
+def _resolved_skip_steps(flow_section: dict) -> tuple[str, ...]:
+    """The skip policy a [flow] section carries (default when undeclared)."""
+    from chipcompiler.rtl2gds import resolve_skip_steps
+
+    return resolve_skip_steps(flow_section)
 
 
 def _target_entries(flow_section: dict) -> list[tuple[str, str]]:
-    """(name, tool) entries for a [flow] section, over the canonical chain."""
+    """(name, tool) entries for a [flow] section, over the canonical chain.
+
+    The section's skip policy (its declared list, or the code default when
+    undeclared) is applied to the chain, so the target never contains steps
+    the workspace excludes.
+    """
     from chipcompiler.data.workspace import _canonical_rtl2gds_flow_entries
     from chipcompiler.data.workspace_config import flow_range_of
 
@@ -152,7 +149,14 @@ def _target_entries(flow_section: dict) -> list[tuple[str, str]]:
     start, end = flow_range
     chain = _canonical_rtl2gds_flow_entries()
     names = [name for name, _tool, _state in chain]
-    return [(name, tool) for name, tool, _state in chain[names.index(start) : names.index(end) + 1]]
+    entries = [
+        (name, tool) for name, tool, _state in chain[names.index(start) : names.index(end) + 1]
+    ]
+    skip = _resolved_skip_steps(flow_section)
+    if skip:
+        excluded = set(skip)
+        entries = [entry for entry in entries if entry[0] not in excluded]
+    return entries
 
 
 def _derive_section_from_persisted(persisted: list[tuple[str, str]]) -> dict:
@@ -169,15 +173,10 @@ def _persisted_flow_data(workspace_dir: Path, json_read) -> dict:
 
 @contextmanager
 def _workspace_lock(workspace_dir: Path):
-    # The lock lives NEXT TO the workspace (never inside it): an overwrite
-    # deleting the tree cannot invalidate the lock's inode, so a waiter
-    # always serializes against the run that replaces the directory.
-    lock_path = workspace_dir.parent / f"{workspace_dir.name}.lock"
-    workspace_dir.parent.mkdir(parents=True, exist_ok=True)
-    with open(lock_path, "a") as lock_file:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+    from chipcompiler.utility.workspace_lock import workspace_lock
+
+    with workspace_lock(workspace_dir):
         yield
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
 def resolve_target_section(project_flow: dict | None, workspace_flow: dict | None) -> dict:
@@ -198,6 +197,11 @@ def _probe_workspace(workspace_dir: Path, target_section: dict | None):
     is due). Nothing is created or written here: no lock, no config
     initialization, no ledger rewrite.
     """
+    from chipcompiler.data.schema_migrations import (
+        FLOW_JSON,
+        UnsupportedSchemaVersionError,
+        ensure_supported_schema_version,
+    )
     from chipcompiler.data.workspace_config import (
         WorkspaceConfigError,
         WorkspaceFlowTargetError,
@@ -207,6 +211,11 @@ def _probe_workspace(workspace_dir: Path, target_section: dict | None):
     from chipcompiler.utility import json_read
 
     flow_data = _persisted_flow_data(workspace_dir, json_read)
+    flow_path = workspace_dir / "home" / "flow.json"
+    try:
+        ensure_supported_schema_version(FLOW_JSON, flow_path, flow_data)
+    except UnsupportedSchemaVersionError as exc:
+        return ReconcileResult(outcome="mismatch", error=f"unsupported_schema_version: {exc}"), {}
     persisted = _persisted_entries(flow_data)
 
     try:
@@ -243,10 +252,15 @@ def _probe_workspace(workspace_dir: Path, target_section: dict | None):
         return ReconcileResult(outcome="no_op", target=_entry_names(target)), {}
 
     relation = compare_flows(persisted, target)
-    if relation == "divergent" and _is_legacy_missing_synthesis_lec(persisted, target):
-        relation = "legacy_missing_synthesis_lec"
-    if relation == "divergent" and _is_legacy_reordered_chain(persisted):
-        relation = "legacy_reordered_chain"
+    if relation == "divergent":
+        # A ledger holding steps the target's policy skips stays compatible:
+        # the skipped entries are inert, never removed or re-inserted.
+        relation = (
+            _relation_with_skipped_steps(
+                persisted, target, _resolved_skip_steps(target_section or {})
+            )
+            or relation
+        )
     if relation == "divergent":
         return (
             ReconcileResult(
@@ -262,10 +276,7 @@ def _probe_workspace(workspace_dir: Path, target_section: dict | None):
         stale = flow_range_of(workspace_flow) != flow_range_of(target_section)
     else:
         stale = bool(target_section)
-    if (
-        relation in {"proper_prefix", "legacy_missing_synthesis_lec", "legacy_reordered_chain"}
-        or stale
-    ):
+    if relation == "proper_prefix" or stale:
         context = {
             "flow_data": flow_data,
             "persisted": persisted,
@@ -288,13 +299,9 @@ def _probe_workspace(workspace_dir: Path, target_section: dict | None):
         # every step WITHIN the requested target range finished; an
         # unfinished one resumes. Steps beyond the target are never the
         # run's business.
-        from chipcompiler.data.step import FINISHED_STEP_STATES
+        from chipcompiler.data.types import FINISHED_STEP_STATES
 
-        target_states = {
-            str(step.get("state", ""))
-            for step in flow_data.get("steps", [])[: len(target)]
-            if isinstance(step, dict)
-        }
+        target_states = _target_step_states(flow_data, target)
         return (
             ReconcileResult(
                 outcome="no_op" if target_states <= FINISHED_STEP_STATES else "resume",
@@ -304,7 +311,7 @@ def _probe_workspace(workspace_dir: Path, target_section: dict | None):
             {},
         )
 
-    from chipcompiler.data.step import FINISHED_STEP_STATES
+    from chipcompiler.data.types import FINISHED_STEP_STATES
 
     states = {
         str(step.get("state", "")) for step in flow_data.get("steps", []) if isinstance(step, dict)
@@ -395,13 +402,19 @@ def _apply_mutation(workspace_dir: Path, probe: ReconcileResult, context: dict) 
 
     if relation == "proper_prefix":
         # Append the missing suffix as Unstart, then adopt the target.
+        # Entries already in the ledger (e.g. steps the effective policy
+        # now skips) are never appended twice, so the suffix is computed
+        # against what the ledger actually holds.
         import copy
 
         from chipcompiler.data.workspace import _flow_step_template
 
         context["flow_data_original"] = copy.deepcopy(flow_data)
         steps = flow_data.setdefault("steps", [])
-        for name, tool in target[len(persisted) :]:
+        present = set(persisted)
+        for name, tool in target:
+            if (name, tool) in present:
+                continue
             steps.append(_flow_step_template(name, tool, "Unstart"))
             appended.append(name)
         if not json_write(workspace_dir / "home" / "flow.json", flow_data):
@@ -411,63 +424,6 @@ def _apply_mutation(workspace_dir: Path, probe: ReconcileResult, context: dict) 
             )
         adopted_flow = dict(target_section)
         outcome = "extended"
-    elif relation == "legacy_missing_synthesis_lec":
-        # Insert the newly required synthesis-level LEC while preserving all
-        # existing step records and their states.
-        import copy
-
-        from chipcompiler.data.workspace import _flow_step_template
-
-        context["flow_data_original"] = copy.deepcopy(flow_data)
-        steps = flow_data.setdefault("steps", [])
-        lec_index = next(index for index, (name, _tool) in enumerate(target) if name == "lec")
-        lec_name, lec_tool = target[lec_index]
-        steps.insert(lec_index, _flow_step_template(lec_name, lec_tool, "Unstart"))
-        appended.append(lec_name)
-        for name, tool in target[len(persisted) + 1 :]:
-            steps.append(_flow_step_template(name, tool, "Unstart"))
-            appended.append(name)
-        if not json_write(workspace_dir / "home" / "flow.json", flow_data):
-            return ReconcileResult(
-                outcome="mismatch",
-                error=f"failed to insert flow step into {workspace_dir / 'home' / 'flow.json'}",
-            )
-        adopted_flow = dict(target_section)
-        outcome = "extended"
-    elif relation == "legacy_reordered_chain":
-        # Map a pre-reorder ledger onto the canonical chain by step name:
-        # the Synthesis..route prefix is identical in both orders and keeps
-        # its records; every post-route step ran with pre-reorder inputs
-        # (DRC/LVS before filler), so it restarts from Unstart.
-        import copy
-
-        from chipcompiler.data.workspace import (
-            _canonical_rtl2gds_flow_entries,
-            _flow_step_template,
-        )
-
-        context["flow_data_original"] = copy.deepcopy(flow_data)
-        persisted_by_name = {
-            step.get("name"): step for step in flow_data.get("steps", []) if isinstance(step, dict)
-        }
-        chain_names = [name for name, _tool, _state in _canonical_rtl2gds_flow_entries()]
-        route_position = chain_names.index("route")
-        steps = []
-        for name, tool in target:
-            old = persisted_by_name.get(name)
-            if old is not None and chain_names.index(name) <= route_position:
-                steps.append(old)
-            else:
-                steps.append(_flow_step_template(name, tool, "Unstart"))
-                if name not in persisted_by_name:
-                    appended.append(name)
-        flow_data["steps"] = steps
-        if not json_write(workspace_dir / "home" / "flow.json", flow_data):
-            return ReconcileResult(
-                outcome="mismatch",
-                error=f"failed to rewrite flow steps into {workspace_dir / 'home' / 'flow.json'}",
-            )
-        adopted_flow = dict(target_section)
     else:
         # Adopt the effective target when the persisted [flow] is stale
         # (crash between append and adopt, a hand-edited file, or an
@@ -484,8 +440,6 @@ def _apply_mutation(workspace_dir: Path, probe: ReconcileResult, context: dict) 
         # failure is an error, not a tolerated partial state. Roll the
         # ledger back too — leaving the appended suffix behind would
         # report failure while the persisted flow is wider than the target.
-        # The reordered-chain migration can rewrite the ledger without
-        # appending a single name, so the rollback keys on the snapshot.
         if "flow_data_original" in context:
             json_write(workspace_dir / "home" / "flow.json", context["flow_data_original"])
         return ReconcileResult(
@@ -499,17 +453,13 @@ def _apply_mutation(workspace_dir: Path, probe: ReconcileResult, context: dict) 
         )
 
     if outcome is None:
-        from chipcompiler.data.step import FINISHED_STEP_STATES
+        from chipcompiler.data.types import FINISHED_STEP_STATES
 
         if relation == "target_prefix":
             # The persisted flow already covers the target: no-op only
             # when every step within the requested target range finished.
             flow_data = _persisted_flow_data(workspace_dir, json_read)
-            target_states = {
-                str(step.get("state", ""))
-                for step in flow_data.get("steps", [])[: len(target)]
-                if isinstance(step, dict)
-            }
+            target_states = _target_step_states(flow_data, target)
             outcome = "no_op" if target_states <= FINISHED_STEP_STATES else "resume"
         else:
             flow_data = _persisted_flow_data(workspace_dir, json_read)

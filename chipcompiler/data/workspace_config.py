@@ -9,9 +9,11 @@ metrics); this module owns the human-facing configuration file only.
 
 Layout::
 
+    schema_version = 1   (top-level; absent in pre-versioning files = version 0)
     [design]   name / top / clock_port / frequency_mhz
     [pdk]      name / root (absolute) / config (workspace-relative)
     [flow]     preset = "rtl2gds"  OR  start = "...", end = "..."
+               skip_steps = [...]  (optional, normalized)
     [params]   flat snake_case parameters; nested dicts map to subtables
 """
 
@@ -25,10 +27,20 @@ from typing import Any
 import tomli_w
 from typing_extensions import deprecated
 
+from .schema_migrations import (
+    PARAMS_TOML,
+    SCHEMA_VERSION_FIELD,
+    SUPPORTED_SCHEMA_VERSIONS,
+    ensure_supported_schema_version,
+)
+
 logger = logging.getLogger(__name__)
 
 WORKSPACE_CONFIG_FILENAME = "params.toml"
 LEGACY_PARAMETERS_FILENAME = "parameters.json"
+
+#: The schema_version written into new home/params.toml documents.
+WORKSPACE_CONFIG_SCHEMA_VERSION = SUPPORTED_SCHEMA_VERSIONS[PARAMS_TOML]
 
 _IDENTITY_FIELDS = ("pdk", "design", "top_module", "clock")
 
@@ -102,12 +114,15 @@ def parameters_have_chip_identity(data: object) -> bool:
     return False
 
 
-def validate_flow_config(flow: object) -> dict[str, str]:
-    """Validate a ``[flow]`` section; return it as a plain string dict.
+def validate_flow_config(flow: object) -> dict:
+    """Validate a ``[flow]`` section; return it as a plain dict.
 
     Raises WorkspaceFlowTargetError on any rule violation: ``preset`` mixed
     with ``start``/``end``, only one of ``start``/``end``, unknown step
-    names, or ``start`` positioned after ``end`` in the canonical chain.
+    names, ``start`` positioned after ``end`` in the canonical chain, or an
+    invalid ``skip_steps`` list. ``skip_steps`` is stored normalized
+    (canonical step values in canonical chain order); an explicit empty
+    list round-trips as ``[]`` and an absent key stays absent.
     """
     if flow is None:
         return {}
@@ -121,14 +136,32 @@ def validate_flow_config(flow: object) -> dict[str, str]:
         raise WorkspaceFlowTargetError("[flow] preset cannot be combined with start/end")
     if (start is None) != (end is None):
         raise WorkspaceFlowTargetError("[flow] start and end must be set together")
-    if preset is None and start is None:
+    if preset is None and start is None and "skip_steps" not in section:
         return {}
 
-    result: dict[str, str] = {}
+    result: dict = {}
+    if "skip_steps" in section:
+        from chipcompiler.rtl2gds import resolve_skip_steps
+
+        try:
+            result["skip_steps"] = list(resolve_skip_steps({"skip_steps": section["skip_steps"]}))
+        except ValueError as exc:
+            raise WorkspaceFlowTargetError(f"[flow] {exc}") from None
+    if preset is None and start is None:
+        # A policy-only section (skip_steps without a flow target).
+        return result
     if preset is not None:
         if not isinstance(preset, str) or not preset.strip():
             raise WorkspaceFlowTargetError(f"[flow] preset must be a non-empty string: {preset!r}")
-        flow_range_for_preset(preset)  # raises on unknown presets
+        first, last = flow_range_for_preset(preset)  # raises on unknown presets
+        excluded = set(result.get("skip_steps") or ())
+        for boundary in (first, last):
+            if boundary in excluded:
+                raise WorkspaceFlowTargetError(
+                    f"[flow] {boundary!r} (the {preset!r} preset boundary) is skipped by "
+                    f"skip_steps and cannot be part of the flow target; set skip_steps = [] "
+                    f"or pick another preset"
+                )
         result["preset"] = preset
         return result
 
@@ -140,15 +173,24 @@ def validate_flow_config(flow: object) -> dict[str, str]:
         if not isinstance(value, str):
             raise WorkspaceFlowTargetError(f"[flow] {key} must be a string: {value!r}")
         # Workspace files carry canonical step names only; display-name
-        # aliases are translated at the manifest/RPC boundary, never here.
+        # aliases are translated at the manifest/adapter boundary, never here.
         if value not in canonical_names:
             raise WorkspaceFlowTargetError(f"[flow] unknown step name: {value!r}")
         normalized[key] = value
+    excluded = set(result.get("skip_steps") or ())
+    for key in ("start", "end"):
+        if normalized[key] in excluded:
+            raise WorkspaceFlowTargetError(
+                f"[flow] {normalized[key]!r} is skipped by skip_steps and cannot "
+                f"bound the flow range; remove it from skip_steps or pick another "
+                f"boundary"
+            )
     if canonical_names.index(normalized["start"]) > canonical_names.index(normalized["end"]):
         raise WorkspaceFlowTargetError(
             f"[flow] start {normalized['start']!r} is after end {normalized['end']!r}"
         )
-    return normalized
+    result.update(normalized)
+    return result
 
 
 def canonical_flow_chain() -> list[str]:
@@ -183,10 +225,10 @@ def flow_range_for_preset(preset: str) -> tuple[str, str]:
 def flow_range_of(flow: dict) -> tuple[str, str] | None:
     """(start, end) canonical names for a validated [flow] section."""
     flow = validate_flow_config(flow)
-    if not flow:
-        return None
     if "preset" in flow:
         return flow_range_for_preset(flow["preset"])
+    if "start" not in flow:
+        return None
     return (flow["start"], flow["end"])
 
 
@@ -204,15 +246,24 @@ def flow_steps_in_range(start: str, end: str) -> list[str]:
         raise WorkspaceFlowTargetError(f"flow range outside the canonical chain: {exc}") from exc
 
 
-def flow_section_from_flow_config(flow_config: dict | None) -> dict[str, str]:
+def flow_section_from_flow_config(flow_config: dict | None) -> dict:
     """Derive the [flow] section (start/end canonical form) from a flow_config.
 
     Uses the same selection resolution as the flow.json seeding, so both
-    stores always describe the same contiguous range. Returns {} when the
+    stores always describe the same contiguous range. A declared
+    ``skip_steps`` policy rides along (normalized); an undeclared one
+    stays absent so the code default keeps applying. Returns {} when the
     flow_config does not select steps.
     """
     if not isinstance(flow_config, dict) or not flow_config:
         return {}
+
+    # A preset-shaped flow_config selects the preset's canonical range.
+    if "preset" in flow_config and "start_step" not in flow_config and "steps" not in flow_config:
+        section: dict = {"preset": flow_config["preset"]}
+        if "skip_steps" in flow_config:
+            section["skip_steps"] = flow_config["skip_steps"]
+        return validate_flow_config(section)
 
     from chipcompiler.data.workspace import _canonical_rtl2gds_flow_entries
 
@@ -221,7 +272,10 @@ def flow_section_from_flow_config(flow_config: dict | None) -> dict[str, str]:
         return {}
 
     # Names are already canonical here; validate to keep the contract explicit.
-    return validate_flow_config({"start": selected[0], "end": selected[-1]})
+    section = {"start": selected[0], "end": selected[-1]}
+    if "skip_steps" in flow_config:
+        section["skip_steps"] = flow_config["skip_steps"]
+    return validate_flow_config(section)
 
 
 def _split_payload(data: dict) -> dict[str, Any]:
@@ -297,6 +351,10 @@ def _decode_workspace_config(path: Path, workspace_dir: str | Path) -> dict:
             raw = tomllib.load(f)
     except (tomllib.TOMLDecodeError, UnicodeDecodeError) as exc:
         raise WorkspaceConfigError(f"workspace config parse failure: {path}: {exc}") from exc
+
+    # A config from a newer ECC (schema_version newer than supported) is
+    # rejected with path and version, never parsed past this point.
+    ensure_supported_schema_version(PARAMS_TOML, path, raw)
 
     flow = validate_flow_config(raw.get("flow"))
     if not flow:
@@ -384,10 +442,10 @@ def render_workspace_config(
     """Render the workspace configuration TOML document.
 
     ``pdk_config`` values inside the workspace are stored
-    workspace-relative; *flow* is validated before rendering.
+    workspace-relative; *flow* is validated — and its normalized form
+    (e.g. canonical ``skip_steps``) — is what gets rendered.
     """
-    if flow:
-        validate_flow_config(flow)
+    normalized_flow = validate_flow_config(flow) if flow else None
     workspace_root = Path(workspace_dir).resolve()
 
     payload = _drop_null_values(dict(data))
@@ -399,11 +457,12 @@ def render_workspace_config(
 
     sections = _split_payload(payload)
     document: dict[str, Any] = {
+        SCHEMA_VERSION_FIELD: WORKSPACE_CONFIG_SCHEMA_VERSION,
         "design": sections["design"],
         "pdk": sections["pdk"],
     }
-    if flow:
-        document["flow"] = dict(flow)
+    if normalized_flow:
+        document["flow"] = dict(normalized_flow)
     document["params"] = sections["params"]
     return tomli_w.dumps(document).encode("utf-8")
 
@@ -517,6 +576,24 @@ def resolve_flow_selection(
         selected_names[-1],
     )
     return (contiguous, True)
+
+
+def warn_legacy_config_shadow(workspace_dir: str | Path) -> None:
+    """Log the ``workspace_config_shadowed`` warning when both configs exist.
+
+    The legacy migration runs only for version-0 configs (see
+    ``chipcompiler.data.schema_migrations``); a leftover legacy
+    ``parameters.json`` next to a versioned ``params.toml`` is still inert,
+    so the disclosure must survive on every open, not only during migration.
+    """
+    config_path = workspace_config_path(workspace_dir)
+    legacy_path = legacy_parameters_path(workspace_dir)
+    if config_path.exists() and legacy_path.exists():
+        logger.warning(
+            "workspace_config_shadowed: both %s and %s exist; using the TOML",
+            config_path,
+            legacy_path,
+        )
 
 
 @deprecated(

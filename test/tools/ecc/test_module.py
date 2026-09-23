@@ -5,8 +5,10 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 import chipcompiler.utility as chipcompiler_utility
-from chipcompiler.data import OriginDesign, StepEnum, Workspace
+from chipcompiler.data import OriginDesign, SkippableStepEnum, StepEnum, Workspace
 from chipcompiler.tools.ecc import metrics as ecc_metrics
 from chipcompiler.tools.ecc import plot as ecc_plot
 from chipcompiler.tools.ecc import service as ecc_service
@@ -156,6 +158,15 @@ def test_init_rcx_omits_explicit_empty_pdk_for_backward_compatibility():
     assert module.ecc.calls == [{"config": "/tmp/rcx_ecc.json"}]
 
 
+def test_run_simple_fp_calls_native_api():
+    module = ECCToolsModule.__new__(ECCToolsModule)
+    module.ecc = FakeEcc()
+
+    assert module.run_simple_fp() is True
+
+    assert module.ecc.calls == [("run_simple_fp", (), {})]
+
+
 def test_view_json_save_passes_output_options():
     module = ECCToolsModule.__new__(ECCToolsModule)
     module.ecc = FakeEcc()
@@ -279,6 +290,17 @@ def test_geometry_snapshot_save_passes_output_directory():
     ]
 
 
+def test_geometry_snapshot_save_includes_drc_only_when_requested():
+    module = ECCToolsModule.__new__(ECCToolsModule)
+    module.ecc = FakeEcc()
+
+    assert module.geometry_snapshot_save(Path("/tmp/geometry"), include_drc=True) is True
+
+    assert module.ecc.calls == [
+        ("geometry_snapshot_save", (), {"output_dir": "/tmp/geometry", "include_drc": True}),
+    ]
+
+
 def test_geometry_edit_session_wrappers_forward_instance_name():
     module = ECCToolsModule.__new__(ECCToolsModule)
     module.ecc = FakeEcc()
@@ -365,7 +387,7 @@ def test_ecc_runtime_wrappers_stringify_path_arguments(tmp_path):
     assert module.read_lvs_verilog(Path("/ws/input_lvs.v"), "gcd") is True
     module.def_save(Path("/ws/output/gcd.def.gz"))
     module.gds_save(Path("/ws/output/gcd.gds.gz"), is_harden=True)
-    module.tcl_save(Path("/ws/script/out.tcl"))
+    assert module.tcl_save(Path("/ws/script/out.tcl")) is True
     module.verilog_save(Path("/ws/output/gcd.v.gz"))
     module.json_save(Path("/ws/output/gcd.json"))
     module.save_data(Path("/ws/output/db"))
@@ -2422,6 +2444,50 @@ def test_ecc_subflow_writes_path_payload_as_json_strings(tmp_path):
     assert data["path"] == str(step.subflow.path)
 
 
+@pytest.mark.parametrize(
+    ("step_name", "expected"),
+    [
+        (
+            StepEnum.PRE_FLOORPLAN.value,
+            ["load data", "init floorplan", "save data"],
+        ),
+        (
+            StepEnum.MACRO_PLACEMENT.value,
+            ["load data", "macro placement", "save data"],
+        ),
+        (
+            StepEnum.POST_FLOORPLAN.value,
+            [
+                "load data",
+                "create tracks",
+                "place io pins",
+                "tap cell",
+                "PDN",
+                "set clock net",
+                "save data",
+                "analysis",
+            ],
+        ),
+    ],
+)
+def test_split_floorplan_subflows_are_independent(tmp_path, step_name, expected):
+    workspace = Workspace(
+        directory=tmp_path,
+        design=OriginDesign(name="gcd", top_module="gcd"),
+    )
+    step = build_step(
+        workspace=workspace,
+        step_name=step_name,
+        input_def=tmp_path / "input.def",
+        input_verilog=tmp_path / "input.v",
+    )
+    build_step_space(step)
+
+    EccSubFlow(workspace, step)
+
+    assert [item["name"] for item in step.subflow.steps] == expected
+
+
 def test_ecc_step_info_stringifies_path_payloads(tmp_path, monkeypatch):
     workspace = Workspace(
         directory=tmp_path,
@@ -2484,19 +2550,19 @@ def test_ecc_builder_uses_explicit_step_directory(tmp_path):
 
     step = build_step(
         workspace=workspace,
-        step_name=StepEnum.TIMING_OPT.value,
+        step_name=SkippableStepEnum.TIMING_OPT.value,
         input_def=tmp_path / "input.def",
         input_verilog=tmp_path / "input.v",
         tool="sizer",
         step_directory=step_directory,
     )
 
-    assert step.name == StepEnum.TIMING_OPT.value
+    assert step.name == SkippableStepEnum.TIMING_OPT.value
     assert step.directory == step_directory
     assert isinstance(step.directory, Path)
     assert step.output.dir == step_directory / "output"
-    assert step.data.steps[StepEnum.TIMING_OPT.value] == step_directory / "data" / "to"
-    assert step.log.file == step_directory / "log" / f"{StepEnum.TIMING_OPT.value}.log"
+    assert step.data.steps[SkippableStepEnum.TIMING_OPT.value] == step_directory / "data" / "to"
+    assert step.log.file == step_directory / "log" / f"{SkippableStepEnum.TIMING_OPT.value}.log"
     assert str(step.output.dir) == f"{step_directory}/output"
-    assert str(step.data.steps[StepEnum.TIMING_OPT.value]) == f"{step_directory}/data/to"
-    assert str(step.log.file) == f"{step_directory}/log/{StepEnum.TIMING_OPT.value}.log"
+    assert str(step.data.steps[SkippableStepEnum.TIMING_OPT.value]) == f"{step_directory}/data/to"
+    assert str(step.log.file) == f"{step_directory}/log/{SkippableStepEnum.TIMING_OPT.value}.log"

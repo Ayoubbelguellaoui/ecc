@@ -36,12 +36,13 @@ parameters = get_design_parameters("ics55", "gcd")
 
 ```python
 from chipcompiler.data import create_workspace, get_pdk, StepEnum, StateEnum
+
 workspace = create_workspace(
     directory=workspace_dir,
     origin_def="",
     origin_verilog=input_verilog,
     pdk=pdk,
-    parameters=parameters
+    parameters=parameters,
 )
 # 使用 `load_workspace` 从已有工作空间恢复
 # workspace = load_workspace(directory=workspace_dir)
@@ -51,48 +52,68 @@ workspace = create_workspace(
 
 ```
 gcd_workspace/
-├── flow.json       # 流程状态文件
-├── params.toml        # 工作区配置文件（设计参数、流程目标）
-├── CTS_ecc         # CTS 步骤工作空间
-│   ├── analysis    # 从指标数据中提取的分析数据文件
-│   ├── config      # 配置文件
-│   ├── data        # 步骤生成的数据文件
-│   ├── feature     # 指标数据特征文件
-│   ├── log         # 各步骤日志文件
-│   ├── output      # 输出产物
-│   ├── report      # 步骤生成的报告
-│   └── script      # 步骤脚本
+├── home/
+│   ├── flow.json          # 流程状态文件
+│   ├── params.toml        # 工作区配置文件（设计参数、流程目标）
+│   ├── home.json          # 工作区主状态（flow/config/checklist 指针）
+│   └── checklist.json     # 检查清单状态
+├── CTS_ecc                # CTS 步骤工作空间
+│   ├── analysis    # 从指标数据中提取的分析数据文件
+│   ├── config      # 配置文件
+│   ├── data        # 步骤生成的数据文件
+│   ├── feature     # 指标数据特征文件
+│   ├── log         # 各步骤日志文件
+│   ├── output      # 输出产物
+│   ├── report      # 步骤生成的报告
+│   └── script      # 步骤脚本
 ├── drc_ecc
-│   ...             # 与上方结构类似，下方亦然
-│   └── script
+│   ...             # 与上方结构类似，下方亦然
+│   └── script
 ├── filler_ecc
-│   ...
-│   └── script
-├── Floorplan_ecc
-│   ...
-│   └── script
-├── legalization_ecc
-│   ...
-│   └── script
+│   ...
+│   └── script
+├── Harden_ecc
+│   ...
+│   └── script
+├── legalization_dreamplace
+│   ...
+│   └── script
 ├── log
-│   └── gcd.xxxx-01-22_16-05-25 # 全局日志文件
+│   └── gcd.xxxx-01-22_16-05-25 # 全局日志文件
+├── lvs_ecc
+│   ...
+│   └── script
+├── macroPlacement_dreamplace
+│   ...
+│   └── script
 ├── origin
-│   ├── gcd.sdc
-│   ├── filelist.f
-│   └── rtl
-├── place_ecc
-│   ...
-│   └── script
+│   ├── gcd.sdc
+│   ├── filelist.f
+│   └── rtl
+├── place_dreamplace
+│   ...
+│   └── script
+├── postFloorplan_ecc
+│   ...
+│   └── script
+├── preFloorplan_ecc
+│   ...
+│   └── script
+├── RCX_ecc
+│   ...
+│   └── script
 ├── route_ecc
-│   ...
-│   └── script
+│   ...
+│   └── script
+├── sta_ecc
+│   ...
+│   └── script
 └── Synthesis_yosys
     ...
     └── script
 ```
 
 然后可以按如下方式设置流程引擎、添加步骤、创建步骤工作空间并运行：
-
 ```python
 from chipcompiler.data import StepEnum, StateEnum
 from chipcompiler.engine import EngineFlow
@@ -181,7 +202,7 @@ workspace = create_workspace(
     origin_verilog="",  # 使用 filelist 时不需要
     pdk=pdk,
     parameters=parameters,
-    input_filelist=input_filelist  # 提供 filelist 而不是单个文件
+    input_filelist=input_filelist,  # 提供 filelist 而不是单个文件
 )
 ```
 
