@@ -327,23 +327,12 @@ def run_existing_workspace(
                     selected = bounded_resume_names(engine_flow, through)
                 else:
                     selected = selected_step_names(engine_flow)
-
                 if selected:
-                    engine_flow.create_step_workspaces(
-                        executable_steps=set(selected)
-                    )
+                    engine_flow.create_step_workspaces(executable_steps=set(selected))
 
-                from chipcompiler.engine import ExecutionPlan, execute
-
-                flow_ok = execute(
-                    engine_flow,
-                    ExecutionPlan(
-                        intent="run",
-                        step_ids=tuple(
-                            step.name for step in engine_flow.workspace_steps
-                        ),
-                    ),
-                ).succeeded
+                with preserve_cli_stdio():
+                    run_result = run_resume(engine_flow, through=through)
+                flow_ok = run_result.ok
         except Exception as exc:
             if workspace_registered:
                 _write_back_status(
