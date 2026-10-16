@@ -510,6 +510,10 @@ def run_step(workspace: Workspace, step: EccStep, ecc_module: ECCToolsModule | N
             state = run_routing(workspace=workspace, step=step, ecc_module=ecc_module)
         case StepEnum.DRC.value:
             state = run_drc(workspace=workspace, step=step, ecc_module=ecc_module)
+        case StepEnum.ANTENNA_CHECK.value:
+            from chipcompiler.tools.ecc.antenna import run_antenna_check
+
+            state = run_antenna_check(workspace=workspace, step=step, ecc_module=ecc_module)
         case StepEnum.LVS.value:
             state = run_lvs(workspace=workspace, step=step, ecc_module=ecc_module)
         case StepEnum.FILLER.value:
@@ -523,6 +527,10 @@ def run_step(workspace: Workspace, step: EccStep, ecc_module: ECCToolsModule | N
             state = run_sta(workspace=workspace, step=step, ecc_module=ecc_module)
         case StepEnum.POWER_ANALYSIS.value:
             state = run_power_analysis(workspace=workspace, step=step, ecc_module=ecc_module)
+        case StepEnum.EMIR.value:
+            from chipcompiler.tools.ecc.emir import run_emir
+
+            state = run_emir(workspace=workspace, step=step, ecc_module=ecc_module)
 
     return state
 

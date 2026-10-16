@@ -115,10 +115,12 @@ def build_rtl2gds_flow(
     steps.append((StepEnum.FILLER, "ecc", StateEnum.Unstart))
     steps.append((StepEnum.LVS, "ecc", StateEnum.Unstart))
     steps.append((StepEnum.DRC, "ecc", StateEnum.Unstart))
+    steps.append((StepEnum.ANTENNA_CHECK, "ecc", StateEnum.Unstart))
     steps.append((SkippableStepEnum.POST_ROUTE_LEC, lec_tool, StateEnum.Unstart))
     steps.append((StepEnum.RCX, "ecc", StateEnum.Unstart))
     steps.append((StepEnum.STA, "ecc", StateEnum.Unstart))
     steps.append((StepEnum.POWER_ANALYSIS, "ecc", StateEnum.Unstart))
+    steps.append((StepEnum.EMIR, "ecc", StateEnum.Unstart))
     steps.append((StepEnum.HARDEN, "ecc", StateEnum.Unstart))
 
     return filter_flow_steps(steps, skip)
@@ -156,6 +158,8 @@ def normalize_flow_step(value: str | StepBaseEnum) -> str:
         "route": StepEnum.ROUTING.value,
         "routing": StepEnum.ROUTING.value,
         "drc": StepEnum.DRC.value,
+        "antenna": StepEnum.ANTENNA_CHECK.value,
+        "antennacheck": StepEnum.ANTENNA_CHECK.value,
         "lvs": StepEnum.LVS.value,
         "filler": StepEnum.FILLER.value,
         "lec": SkippableStepEnum.LEC.value,
@@ -164,6 +168,7 @@ def normalize_flow_step(value: str | StepBaseEnum) -> str:
         "rcx": StepEnum.RCX.value,
         "sta": StepEnum.STA.value,
         "poweranalysis": StepEnum.POWER_ANALYSIS.value,
+        "emir": StepEnum.EMIR.value,
         "harden": StepEnum.HARDEN.value,
     }
     return aliases.get(alias_key, token)

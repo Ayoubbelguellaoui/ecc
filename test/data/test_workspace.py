@@ -37,6 +37,7 @@ EXPECTED_WORKSPACE_CONFIG_FILENAMES = {
     StepEnum.RCX.value: "rcx_ecc.json",
     StepEnum.STA.value: "sta_ecc.json",
     "sizer": "sizer_ecc.json",
+    StepEnum.EMIR.value: "emir_ecc.json",
     "dreamplace": "dreamplace_ecc.json",
 }
 
@@ -505,10 +506,12 @@ def test_create_workspace_derives_dynamic_flow_from_boundaries(
         "filler",
         "lvs",
         "drc",
+        "antennaCheck",
         "postRouteLec",
         "RCX",
         "sta",
         "powerAnalysis",
+        "emir",
         "Harden",
     ]
 
@@ -551,6 +554,7 @@ def test_create_workspace_normalizes_post_route_lec_step_aliases(
     assert [(step["name"], step["tool"]) for step in flow_data["steps"]] == [
         ("lvs", "ecc"),
         ("drc", "ecc"),
+        ("antennaCheck", "ecc"),
         ("postRouteLec", "kepler_formal"),
     ]
 
