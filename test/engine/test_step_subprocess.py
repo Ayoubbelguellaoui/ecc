@@ -99,19 +99,21 @@ def test_rcx_worker_restores_outputs_and_preserves_shared_sta_list(monkeypatch, 
     step.output = EccOutput(dir=tmp_path / "output")
     shared_sta_inputs = step.output.spef
     result_path = Path(step.log.file).parent / step_subprocess._RESULT_NAME
-    result_path.write_text(
-        json.dumps(
-            {
-                "done": True,
-                "ok": True,
-                "events": [],
-                "rcx_spef": ["sample_TYPICAL_25C.spef"],
-            }
+
+    def spawn(*_args, **_kwargs):
+        result_path.write_text(
+            json.dumps(
+                {
+                    "done": True,
+                    "ok": True,
+                    "events": [],
+                    "rcx_spef": ["sample_TYPICAL_25C.spef"],
+                }
+            )
         )
-    )
-    monkeypatch.setattr(
-        step_subprocess.subprocess, "Popen", lambda *_args, **_kwargs: _FakePopen(poll_script=[0])
-    )
+        return _FakePopen(poll_script=[0])
+
+    monkeypatch.setattr(step_subprocess.subprocess, "Popen", spawn)
 
     result = step_subprocess.execute_step_subprocess(_workspace(tmp_path), step)
 
@@ -137,9 +139,13 @@ def test_sta_step_memory_includes_corner_workers(monkeypatch, tmp_path):
 
     step = _workspace_step(tmp_path, name="sta")
     result_path = Path(step.log.file).parent / step_subprocess._RESULT_NAME
-    result_path.write_text(json.dumps({"done": True, "ok": True, "events": []}))
     fake = _FakePopen(poll_script=[0])
-    monkeypatch.setattr(step_subprocess.subprocess, "Popen", lambda *_args, **_kwargs: fake)
+
+    def spawn(*_args, **_kwargs):
+        result_path.write_text(json.dumps({"done": True, "ok": True, "events": []}))
+        return fake
+
+    monkeypatch.setattr(step_subprocess.subprocess, "Popen", spawn)
     readings = iter([30, 60])
     monkeypatch.setattr(sta_parallel, "get_sta_process_rss_mb", lambda _pid: next(readings))
     result = step_subprocess.execute_step_subprocess(_workspace(tmp_path), step)
@@ -202,16 +208,63 @@ def test_execute_step_subprocess_reports_worker_crash(monkeypatch, tmp_path):
     assert "code -11" in result.error
 
 
+def test_stale_success_result_from_previous_run_is_not_reported(monkeypatch, tmp_path):
+    """A result left behind by a previous run must never count as this run's outcome.
+
+    The worker only flushes after payload parsing and setup, so a worker that
+    dies before its first flush must surface as a failed step, not as the
+    previous run's success.
+    """
+    monkeypatch.setenv(step_subprocess._ENABLED_ENV, "1")
+    step = _workspace_step(tmp_path)
+    result_path = Path(step.log.file).parent / step_subprocess._RESULT_NAME
+    result_path.write_text(json.dumps({"done": True, "ok": True, "events": []}), encoding="utf-8")
+    # The new worker is killed before it writes anything.
+    monkeypatch.setattr(
+        step_subprocess.subprocess, "Popen", lambda *a, **k: _FakePopen(returncode=-9)
+    )
+
+    result = execute_tool_step(_workspace(tmp_path), step, None)
+
+    assert result.error is not None
+    assert "code -9" in result.error
+    assert not result_path.exists()
+
+
+def test_success_result_with_nonzero_worker_exit_is_failure(monkeypatch, tmp_path):
+    """A worker that dies after flushing success must not read as a clean step."""
+    monkeypatch.setenv(step_subprocess._ENABLED_ENV, "1")
+    step = _workspace_step(tmp_path)
+    result_path = Path(step.log.file).parent / step_subprocess._RESULT_NAME
+
+    def spawn(*_args, **_kwargs):
+        result_path.write_text(
+            json.dumps({"done": True, "ok": True, "events": []}), encoding="utf-8"
+        )
+        return _FakePopen(returncode=-9)
+
+    monkeypatch.setattr(step_subprocess.subprocess, "Popen", spawn)
+
+    result = execute_tool_step(_workspace(tmp_path), step, None)
+
+    assert result.error is not None
+    assert "code -9" in result.error
+
+
 def test_execute_step_subprocess_reports_worker_failure_result(monkeypatch, tmp_path):
     monkeypatch.setenv(step_subprocess._ENABLED_ENV, "1")
     step = _workspace_step(tmp_path)
     result_path = Path(step.log.file).parent / step_subprocess._RESULT_NAME
-    result_path.write_text(
-        json.dumps({"done": True, "ok": False, "error": "boom", "events": []}),
-        encoding="utf-8",
-    )
     fake = _FakePopen(returncode=1)
-    monkeypatch.setattr(step_subprocess.subprocess, "Popen", lambda *a, **k: fake)
+
+    def spawn(*_args, **_kwargs):
+        result_path.write_text(
+            json.dumps({"done": True, "ok": False, "error": "boom", "events": []}),
+            encoding="utf-8",
+        )
+        return fake
+
+    monkeypatch.setattr(step_subprocess.subprocess, "Popen", spawn)
     result = execute_tool_step(_workspace(tmp_path), step, None)
 
     assert result.error is not None
@@ -222,22 +275,22 @@ def test_execute_step_subprocess_succeeds_and_replays_events(monkeypatch, tmp_pa
     monkeypatch.setenv(step_subprocess._ENABLED_ENV, "1")
     step = _workspace_step(tmp_path)
     result_path = Path(step.log.file).parent / step_subprocess._RESULT_NAME
-    result_path.write_text(
-        json.dumps(
-            {
-                "done": True,
-                "ok": True,
-                "error": None,
-                "events": [
-                    {"type": "subflow_stage", "subflow_step": {"name": "load", "state": "Ongoing"}},
-                    {"type": "subflow_stage", "subflow_step": {"name": "load", "state": "Success"}},
-                ],
-            }
-        ),
-        encoding="utf-8",
-    )
+    worker_result = {
+        "done": True,
+        "ok": True,
+        "error": None,
+        "events": [
+            {"type": "subflow_stage", "subflow_step": {"name": "load", "state": "Ongoing"}},
+            {"type": "subflow_stage", "subflow_step": {"name": "load", "state": "Success"}},
+        ],
+    }
     fake = _FakePopen(returncode=0)
-    monkeypatch.setattr(step_subprocess.subprocess, "Popen", lambda *a, **k: fake)
+
+    def spawn(*_args, **_kwargs):
+        result_path.write_text(json.dumps(worker_result), encoding="utf-8")
+        return fake
+
+    monkeypatch.setattr(step_subprocess.subprocess, "Popen", spawn)
 
     replayed = []
 

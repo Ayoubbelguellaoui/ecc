@@ -85,6 +85,16 @@ def execute_step_subprocess(
         "parent_pid": os.getpid(),
     }
 
+    # Discard any result a previous run left behind: the worker only flushes
+    # once it is past payload parsing and setup, so a crash or kill before
+    # that point would otherwise surface the stale outcome as this run's.
+    try:
+        result_path.unlink(missing_ok=True)
+    except OSError as exc:
+        return _result(
+            start_time, 0.0, error=f"{step_tag} cannot clear previous worker result: {exc}"
+        )
+
     try:
         if log_file:
             with open(log_file, "ab") as log_handle:
@@ -131,6 +141,10 @@ def execute_step_subprocess(
             step_error = f"{step_tag} worker exited with code {process.returncode}."
         elif result.get("ok") is not True:
             step_error = f"{step_tag} worker reported failure: {result.get('error')}"
+        elif process.returncode != 0:
+            # A success result with a non-zero exit means the worker died
+            # after flushing; without this the run reads as a clean step.
+            step_error = f"{step_tag} worker exited with code {process.returncode}."
         elif workspace_step.name == StepEnum.RCX.value:
             step_error = _restore_rcx_outputs(workspace_step, result)
     if isinstance(result, dict) and result.get("done") is True:
