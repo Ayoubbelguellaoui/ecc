@@ -32,6 +32,7 @@ EXPECTED_WORKSPACE_CONFIG_FILENAMES = {
     "db": "db_ecc.json",
     StepEnum.CTS.value: "cts_ecc.json",
     StepEnum.DRC.value: "drc_ecc.json",
+    StepEnum.MASK_DRC.value: "mask_drc_ecc.json",
     StepEnum.FLOORPLAN.value: "floorplan_ecc.json",
     "macro_location": "macro_location.tcl",
     StepEnum.ROUTING.value: "route_ecc.json",
@@ -394,6 +395,7 @@ def test_create_workspace_derives_dynamic_flow_from_boundaries(
         "sta",
         "powerAnalysis",
         "emir",
+        "mask_drc",
         "Harden",
     ]
 

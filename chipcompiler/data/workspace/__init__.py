@@ -181,6 +181,7 @@ _WORKSPACE_CONFIG_FILENAMES: Final[dict[str, str]] = {
     "db": "db_ecc.json",
     StepEnum.CTS.value: "cts_ecc.json",
     StepEnum.DRC.value: "drc_ecc.json",
+    StepEnum.MASK_DRC.value: "mask_drc_ecc.json",
     StepEnum.FLOORPLAN.value: "floorplan_ecc.json",
     "macro_location": "macro_location.tcl",
     StepEnum.ROUTING.value: "route_ecc.json",
@@ -220,6 +221,7 @@ _STEP_CONFIG_KEYS: Final[dict[tuple[StepBaseEnum, str], tuple[str, ...]]] = {
     (StepEnum.ROUTING, "ecc"): ("db", StepEnum.ROUTING.value),
     (StepEnum.DRC, "ecc"): ("db", StepEnum.DRC.value),
     (StepEnum.ANTENNA_CHECK, "ecc"): ("db",),
+    (StepEnum.MASK_DRC, "ics55_klayout_drc"): (StepEnum.MASK_DRC.value,),
     (StepEnum.LEGALIZATION, "ecc"): ("db",),
     (StepEnum.FILLER, "ecc"): ("db", StepEnum.FILLER.value),
     (StepEnum.RCX, "ecc"): ("db", StepEnum.RCX.value),
@@ -682,11 +684,13 @@ def init_workspace_config(workspace: Workspace) -> None:
     config_dir = workspace.config["dir"]
     root_dir = Path(__file__).resolve().parent.parent.parent
     ecc_config_dir = root_dir / "tools" / "ecc" / "configs"
+    mask_drc_config_dir = root_dir / "tools" / "ics55_klayout_drc" / "configs"
     dreamplace_config = root_dir / "tools" / "ecc_dreamplace" / "configs" / "dreamplace_ecc.json"
 
     migrate_workspace_config_filenames(workspace.directory)
 
     _copy_missing_files(ecc_config_dir, config_dir)
+    _copy_missing_files(mask_drc_config_dir, config_dir)
     if not workspace.config["dreamplace"].exists():
         shutil.copy2(dreamplace_config, workspace.config["dreamplace"])
     _ensure_writable(config_dir)

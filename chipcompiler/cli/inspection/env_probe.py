@@ -181,6 +181,22 @@ def probe_klayout() -> ProbeResult:
     )
 
 
+def probe_mask_drc() -> ProbeResult:
+    from chipcompiler.tools.ics55_klayout_drc.utility import is_eda_exist
+
+    if is_eda_exist():
+        return ProbeResult("mask-drc", PASS, detail="klayout and the ICS55 deck are available")
+    return ProbeResult(
+        "mask-drc",
+        FAIL,
+        detail="required by the mask_drc flow step",
+        remediation=(
+            "Install KLayout and set ICS55_KLAYOUT_DRC_ROOT to the "
+            "ics55_klayout_drc checkout."
+        ),
+    )
+
+
 def probe_sizer() -> ProbeResult:
     from chipcompiler.tools.ecc_sizer.utility import (
         get_sizer_command,
@@ -297,6 +313,7 @@ _PROBES = {
     "ecc-tools": probe_ecc_tools,
     "dreamplace": probe_dreamplace,
     "klayout": probe_klayout,
+    "mask-drc": probe_mask_drc,
     "sizer": probe_sizer,
     "kepler-formal": probe_kepler_formal,
     "lec-dual": probe_lec_dual,

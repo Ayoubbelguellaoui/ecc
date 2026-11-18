@@ -282,7 +282,27 @@ def _manual_macro_placement_items(workspace: Workspace, step: WorkspaceStep) -> 
 def _step_artifact_items(workspace: Workspace, step: WorkspaceStep) -> list[dict]:
     if step.name == StepEnum.MACRO_PLACEMENT.value:
         return _manual_macro_placement_items(workspace, step)
-    if step.name == StepEnum.HARDEN.value:
+    if step.name == StepEnum.MASK_DRC.value:
+        data_dir = (step.data.steps or {}).get(StepEnum.MASK_DRC.value)
+        report_dir = step.report.dir
+        artifacts = (
+            (
+                "violations",
+                "Mask DRC violation map",
+                Path(data_dir) / "violation_map.json" if data_dir else None,
+            ),
+            (
+                "lyrdb",
+                "Mask DRC marker database",
+                Path(report_dir) / "mask_drc.lyrdb" if report_dir else None,
+            ),
+            (
+                "html",
+                "Mask DRC HTML report",
+                Path(report_dir) / "mask_drc_report.html" if report_dir else None,
+            ),
+        )
+    elif step.name == StepEnum.HARDEN.value:
         artifacts = (
             ("gds", "Harden GDS", getattr(step.output, "gds", None)),
             ("lef", "Harden LEF", getattr(step.output, "lef", None)),

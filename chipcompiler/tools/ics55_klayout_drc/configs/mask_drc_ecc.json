@@ -1,0 +1,29 @@
+{
+  "pdk_root": "",
+  "layout": "",
+  "top": "",
+  "klayout": "",
+  "threads": 0,
+  "stack": {
+    "total_metal": 6,
+    "top_metal": 1,
+    "T2V1_T2M1": 0,
+    "T2V2_T2M2": 0,
+    "T4V1_T4M1": 0,
+    "T4V2_T4M2": 1,
+    "T8V1_T8M1": 0,
+    "T8V2_T8M2": 0
+  },
+  "switches": {
+    "recommended": false,
+    "density": true,
+    "latchup": true,
+    "dup": true,
+    "metal_slot": true,
+    "mom": true,
+    "esd": true,
+    "poly_efuse": true,
+    "allow_v01": false,
+    "chipedge": true
+  }
+}

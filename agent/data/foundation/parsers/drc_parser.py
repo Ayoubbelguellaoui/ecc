@@ -26,6 +26,11 @@ def _drc_artifact_paths(stage_dir: Path) -> tuple[Path, Path]:
             stage_dir / "data" / "drc_final" / "violation_map.json",
             stage_dir / "analysis" / "drc_final_metrics.json",
         )
+    if stage_dir.name == "mask_drc_ecc":
+        return (
+            stage_dir / "data" / "drc" / "violation_map.json",
+            stage_dir / "analysis" / "mask_drc_metrics.json",
+        )
     return (
         stage_dir / "data" / "drc" / "violation_map.json",
         stage_dir / "analysis" / f"{stage_dir.name.split('_', 1)[0]}_metrics.json",

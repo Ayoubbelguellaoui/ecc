@@ -125,6 +125,7 @@ def build_rtl2gds_flow(
     steps.append((StepEnum.STA, ToolName.ECC.value, StateEnum.Unstart))
     steps.append((StepEnum.POWER_ANALYSIS, ToolName.ECC.value, StateEnum.Unstart))
     steps.append((StepEnum.EMIR, ToolName.ECC.value, StateEnum.Unstart))
+    steps.append((StepEnum.MASK_DRC, "ics55_klayout_drc", StateEnum.Unstart))
     steps.append((StepEnum.HARDEN, ToolName.ECC.value, StateEnum.Unstart))
 
     return filter_flow_steps(steps, skip)
@@ -167,6 +168,7 @@ def normalize_flow_step(value: str | StepBaseEnum) -> str:
         "drc": StepEnum.DRC.value,
         "antenna": StepEnum.ANTENNA_CHECK.value,
         "antennacheck": StepEnum.ANTENNA_CHECK.value,
+        "maskdrc": StepEnum.MASK_DRC.value,
         "lvs": StepEnum.LVS.value,
         "filler": StepEnum.FILLER.value,
         "lec": SkippableStepEnum.LEC.value,

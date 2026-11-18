@@ -51,6 +51,7 @@ class StepEnum(StepBaseEnum):
     SIGNOFF = "Signoff"
     STA = "sta"
     DRC = "drc"
+    MASK_DRC = "mask_drc"
     ANTENNA_CHECK = "antennaCheck"
     LVS = "lvs"
     RCX = "RCX"
@@ -126,6 +127,7 @@ FLOW_STEP_POLICIES: Final[dict[str, FlowStepPolicy]] = {
     StepEnum.FILLER.value: FlowStepPolicy(FlowStepCategory.PNR),
     StepEnum.LVS.value: FlowStepPolicy(FlowStepCategory.CHECKER, FlowInputSource.CHECKER_BATCH),
     StepEnum.DRC.value: FlowStepPolicy(FlowStepCategory.CHECKER, FlowInputSource.CHECKER_BATCH),
+    StepEnum.MASK_DRC.value: FlowStepPolicy(FlowStepCategory.CHECKER, FlowInputSource.FILLER),
     StepEnum.ANTENNA_CHECK.value: FlowStepPolicy(
         FlowStepCategory.CHECKER, FlowInputSource.FILLER, advisory=True
     ),

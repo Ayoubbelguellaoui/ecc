@@ -78,6 +78,7 @@ def test_build_rtl2gds_flow_is_the_complete_flow():
         (StepEnum.STA, "ecc", StateEnum.Unstart),
         (StepEnum.POWER_ANALYSIS, "ecc", StateEnum.Unstart),
         (StepEnum.EMIR, "ecc", StateEnum.Unstart),
+        (StepEnum.MASK_DRC, "ics55_klayout_drc", StateEnum.Unstart),
         (StepEnum.HARDEN, "ecc", StateEnum.Unstart),
     ]
 
@@ -92,6 +93,7 @@ def test_default_flow_data_marks_checker_steps():
         "lvs",
         "drc",
         "antennaCheck",
+        "mask_drc",
         "postRouteLec",
         "RCX",
         "sta",

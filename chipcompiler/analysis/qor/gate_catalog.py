@@ -7,6 +7,7 @@ from chipcompiler.data import StepEnum
 # Step-level gates emitted by tools/ecc/metrics.py into analysis/qor_summary.json.
 QOR_STEP_GATE_IDS = {
     StepEnum.DRC.value: ("qor.drc.clean",),
+    StepEnum.MASK_DRC.value: ("qor.mask_drc.clean",),
     StepEnum.LVS.value: ("qor.lvs.clean",),
     StepEnum.RCX.value: (
         "qor.rcx.corner_coverage",

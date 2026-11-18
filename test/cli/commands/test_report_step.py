@@ -292,6 +292,7 @@ class TestStepOverview:
             "sta",
             "poweranalysis",
             "emir",
+            "mask_drc",
             "harden",
         ]
 

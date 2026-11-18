@@ -47,6 +47,7 @@ class TestStatus:
             "sta",
             "poweranalysis",
             "emir",
+            "mask_drc",
             "harden",
         ]
 
