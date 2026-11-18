@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 """ECC-facing artifacts derived from the standalone mask DRC run."""
 
+import json
 import shutil
 from pathlib import Path
 
@@ -18,7 +19,11 @@ REPORT_COPIES = {
 
 
 def load_violation_map(data_dir: Path | str) -> list[dict]:
-    payload = json_read(Path(data_dir) / "violation_map.json")
+    path = Path(data_dir) / "violation_map.json"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return []
     return payload if isinstance(payload, list) else []
 
 
